@@ -7,6 +7,7 @@ import { getPool } from "./db.js";
 import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
 import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
 import { getAllChats, getChatById, createChat, updateChat, deleteChat } from "./chatStore.js";
+import { findOrCreateUser, validatePasswordLogin, getUserByEmail } from "./userStore.js";
 
 const app = express();
 app.use(cors());
@@ -173,6 +174,57 @@ app.post("/api/execute-sql", async (req, res) => {
       success: false,
       error: error.message || "Failed to execute modified SQL query.",
     });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Auth routes (MongoDB User persistence)
+// ---------------------------------------------------------------------------
+
+// Password login (auto-registers if new user)
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ success: false, error: "Email and password are required." });
+    }
+    const user = await validatePasswordLogin(email, password);
+    if (!user) {
+      return res.status(401).json({ success: false, error: "Invalid email or password." });
+    }
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error("POST /api/auth/login error:", err);
+    res.status(500).json({ success: false, error: "Authentication failed." });
+  }
+});
+
+// OTP / Google sign-in (find or create user)
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { email, name, mobile, provider, avatar } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: "Email is required." });
+    }
+    const user = await findOrCreateUser({ email, name, mobile, provider, avatar });
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error("POST /api/auth/register error:", err);
+    res.status(500).json({ success: false, error: "Registration failed." });
+  }
+});
+
+// Get user profile
+app.get("/api/auth/profile", async (req, res) => {
+  try {
+    const email = req.headers["x-user-email"];
+    if (!email) return res.status(400).json({ success: false, error: "Email header required." });
+    const user = await getUserByEmail(email);
+    if (!user) return res.status(404).json({ success: false, error: "User not found." });
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error("GET /api/auth/profile error:", err);
+    res.status(500).json({ success: false, error: "Failed to load profile." });
   }
 });
 

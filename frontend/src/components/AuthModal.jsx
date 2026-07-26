@@ -45,21 +45,36 @@ export default function AuthModal({ onLogin }) {
   }
 
   // ---------------------------------------------------------------------------
-  // Handlers
+  // Handlers — all call backend API to persist users in MongoDB
   // ---------------------------------------------------------------------------
 
-  function handleGoogleLogin() {
-    const targetEmail = email.trim() || "atharvajain13335code@gmail.com";
-    const name = targetEmail.split("@")[0].replace(/[._]/g, " ");
-    onLogin({
-      email: targetEmail,
-      name: name.charAt(0).toUpperCase() + name.slice(1),
-      provider: "google",
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(targetEmail)}`,
-    });
+  async function handleGoogleLogin() {
+    const targetEmail = email.trim() || otpEmail.trim();
+    if (!targetEmail || !targetEmail.includes("@")) {
+      setError("Please enter a Gmail address first, then click Continue with Google.");
+      return;
+    }
+    setError("");
+    try {
+      const name = targetEmail.split("@")[0].replace(/[._]/g, " ");
+      const formattedName = name.charAt(0).toUpperCase() + name.slice(1);
+      const avatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(targetEmail)}`;
+
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: targetEmail, name: formattedName, provider: "google", avatar }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Google sign-in failed.");
+
+      onLogin({ email: data.user.email, name: data.user.name, provider: "google", avatar: data.user.avatar || avatar });
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
-  function handlePasswordLogin(e) {
+  async function handlePasswordLogin(e) {
     e.preventDefault();
     if (!email.trim() || !email.includes("@")) {
       setError("Please enter a valid email address.");
@@ -69,13 +84,25 @@ export default function AuthModal({ onLogin }) {
       setError("Password must be at least 4 characters long.");
       return;
     }
-    const name = email.split("@")[0];
-    onLogin({
-      email: email.trim().toLowerCase(),
-      name: name.charAt(0).toUpperCase() + name.slice(1),
-      provider: "password",
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(email)}`,
-    });
+    setError("");
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Invalid email or password.");
+
+      onLogin({
+        email: data.user.email,
+        name: data.user.name,
+        provider: data.user.provider || "password",
+        avatar: data.user.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(email)}`,
+      });
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   function handleSendEmailOtp(e) {
@@ -84,7 +111,6 @@ export default function AuthModal({ onLogin }) {
       setError("Please enter a valid Gmail / Email address.");
       return;
     }
-    // Generate simulated 6-digit OTP
     const mockOtp = Math.floor(100000 + Math.random() * 900000).toString();
     setGeneratedEmailOtp(mockOtp);
     setEmailOtpSent(true);
@@ -93,19 +119,29 @@ export default function AuthModal({ onLogin }) {
     setTimer(30);
   }
 
-  function handleVerifyEmailOtp(e) {
+  async function handleVerifyEmailOtp(e) {
     e.preventDefault();
     if (emailOtpCode !== generatedEmailOtp && emailOtpCode !== "123456") {
       setError("Invalid OTP code. Please try again or resend.");
       return;
     }
-    const name = otpEmail.split("@")[0];
-    onLogin({
-      email: otpEmail.trim().toLowerCase(),
-      name: name.charAt(0).toUpperCase() + name.slice(1),
-      provider: "email-otp",
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(otpEmail)}`,
-    });
+    setError("");
+    try {
+      const name = otpEmail.split("@")[0];
+      const avatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(otpEmail)}`;
+
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: otpEmail.trim(), name: name.charAt(0).toUpperCase() + name.slice(1), provider: "email-otp", avatar }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Email OTP verification failed.");
+
+      onLogin({ email: data.user.email, name: data.user.name, provider: "email-otp", avatar: data.user.avatar || avatar });
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   function handleSendMobileOtp(e) {
@@ -123,21 +159,30 @@ export default function AuthModal({ onLogin }) {
     setTimer(30);
   }
 
-  function handleVerifyMobileOtp(e) {
+  async function handleVerifyMobileOtp(e) {
     e.preventDefault();
     if (mobileOtpCode !== generatedMobileOtp && mobileOtpCode !== "123456") {
       setError("Invalid SMS OTP code. Please check and try again.");
       return;
     }
-    const cleanNum = mobileNum.replace(/\D/g, "");
-    const generatedEmail = `user_${cleanNum.slice(-4)}@mobile-user.com`;
-    onLogin({
-      email: generatedEmail,
-      name: `User ${cleanNum.slice(-4)}`,
-      mobile: mobileNum,
-      provider: "mobile-otp",
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(cleanNum)}`,
-    });
+    setError("");
+    try {
+      const cleanNum = mobileNum.replace(/\D/g, "");
+      const generatedEmail = `user_${cleanNum.slice(-4)}@mobile-user.com`;
+      const avatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(cleanNum)}`;
+
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: generatedEmail, name: `User ${cleanNum.slice(-4)}`, mobile: mobileNum, provider: "mobile-otp", avatar }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Mobile OTP verification failed.");
+
+      onLogin({ email: data.user.email, name: data.user.name, mobile: mobileNum, provider: "mobile-otp", avatar: data.user.avatar || avatar });
+    } catch (err) {
+      setError(err.message);
+    }
   }
 
   return (
