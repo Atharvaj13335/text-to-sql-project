@@ -304,21 +304,31 @@ app.delete("/api/chats/:id", async (req, res) => {
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 // ---------------------------------------------------------------------------
-// Start server with MongoDB connection
+// Start server with MongoDB connection (Auto-spawns embedded MongoMemoryServer if needed)
 // ---------------------------------------------------------------------------
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/text_to_sql";
+const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/text_to_sql";
 const PORT = process.env.PORT || 3001;
 
-mongoose
-  .connect(MONGO_URI, { serverSelectionTimeoutMS: 3000 })
-  .then(() => {
+async function startServer() {
+  try {
+    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 2000 });
     console.log("Connected to MongoDB at", MONGO_URI);
-  })
-  .catch((err) => {
-    console.warn("MongoDB connection unavailable:", err.message);
-    console.warn("Falling back to in-memory chat store.");
-  })
-  .finally(() => {
+  } catch {
+    console.warn("Local MongoDB instance not detected on 127.0.0.1:27017.");
+    console.log("Starting embedded local MongoDB server...");
+    try {
+      const { MongoMemoryServer } = await import("mongodb-memory-server");
+      const mongod = await MongoMemoryServer.create();
+      const embeddedUri = mongod.getUri();
+      await mongoose.connect(embeddedUri);
+      console.log("SUCCESS: Connected to Embedded Local MongoDB at", embeddedUri);
+    } catch (err) {
+      console.warn("Embedded MongoDB failed, falling back to in-memory store:", err.message);
+    }
+  } finally {
     app.listen(PORT, () => console.log(`Backend listening on http://localhost:${PORT}`));
-  });
+  }
+}
+
+startServer();
