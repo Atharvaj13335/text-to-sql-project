@@ -180,9 +180,19 @@ app.post("/api/execute-sql", async (req, res) => {
 // Chat persistence routes (MongoDB)
 // ---------------------------------------------------------------------------
 
-app.get("/api/chats", async (_req, res) => {
+// Helper to extract authenticated user's email from request headers
+function getUserEmail(req) {
+  const email = req.headers["x-user-email"] || req.query.userEmail || req.body?.userEmail;
+  if (!email || typeof email !== "string") {
+    return "guest@financial-assistant.com";
+  }
+  return email.trim().toLowerCase();
+}
+
+app.get("/api/chats", async (req, res) => {
   try {
-    const chats = await getAllChats();
+    const userEmail = getUserEmail(req);
+    const chats = await getAllChats(userEmail);
     res.json({ success: true, chats });
   } catch (err) {
     console.error("GET /api/chats error:", err);
@@ -192,9 +202,10 @@ app.get("/api/chats", async (_req, res) => {
 
 app.post("/api/chats", async (req, res) => {
   try {
+    const userEmail = getUserEmail(req);
     const { chatId, title, messages } = req.body;
     if (!chatId) return res.status(400).json({ success: false, error: "chatId is required." });
-    const chat = await createChat({ chatId, title, messages });
+    const chat = await createChat({ chatId, userEmail, title, messages });
     res.status(201).json({ success: true, chat });
   } catch (err) {
     console.error("POST /api/chats error:", err);
@@ -204,7 +215,8 @@ app.post("/api/chats", async (req, res) => {
 
 app.get("/api/chats/:id", async (req, res) => {
   try {
-    const chat = await getChatById(req.params.id);
+    const userEmail = getUserEmail(req);
+    const chat = await getChatById(req.params.id, userEmail);
     if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true, chat });
   } catch (err) {
@@ -215,7 +227,8 @@ app.get("/api/chats/:id", async (req, res) => {
 
 app.put("/api/chats/:id", async (req, res) => {
   try {
-    const chat = await updateChat(req.params.id, req.body);
+    const userEmail = getUserEmail(req);
+    const chat = await updateChat(req.params.id, userEmail, req.body);
     if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true, chat });
   } catch (err) {
@@ -226,7 +239,8 @@ app.put("/api/chats/:id", async (req, res) => {
 
 app.delete("/api/chats/:id", async (req, res) => {
   try {
-    const deleted = await deleteChat(req.params.id);
+    const userEmail = getUserEmail(req);
+    const deleted = await deleteChat(req.params.id, userEmail);
     if (!deleted) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true });
   } catch (err) {

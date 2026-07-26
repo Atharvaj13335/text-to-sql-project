@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import ChatInterface from "./components/ChatInterface.jsx";
 import ParticleField from "./components/ParticleField.jsx";
-import { History, Plus, MessageSquare, Trash2, X, Loader2 } from "lucide-react";
+import AuthModal from "./components/AuthModal.jsx";
+import { History, Plus, MessageSquare, Trash2, X, Loader2, LogOut, User } from "lucide-react";
 
 function genChatId() {
   return "chat_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5);
@@ -24,7 +25,7 @@ function FullscreenBackground() {
   );
 }
 
-function SidebarHistory({ isOpen, onClose, chats, activeChatId, onSelectChat, onNewChat, onDeleteChat, loading }) {
+function SidebarHistory({ isOpen, onClose, chats, activeChatId, onSelectChat, onNewChat, onDeleteChat, loading, user, onLogout }) {
   if (!isOpen) return null;
 
   return (
@@ -43,9 +44,29 @@ function SidebarHistory({ isOpen, onClose, chats, activeChatId, onSelectChat, on
         </button>
       </div>
 
+      {/* User Badge */}
+      {user && (
+        <div className="mt-3 p-2.5 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between">
+          <div className="flex items-center gap-2.5 overflow-hidden">
+            <img src={user.avatar} alt={user.name} className="w-8 h-8 rounded-full border border-accent/40 bg-accent/20" />
+            <div className="truncate">
+              <div className="text-[13px] font-medium text-white truncate">{user.name}</div>
+              <div className="text-[10px] text-white/50 font-mono truncate">{user.email}</div>
+            </div>
+          </div>
+          <button
+            onClick={onLogout}
+            className="p-1.5 text-white/40 hover:text-red-400 transition-colors rounded-lg hover:bg-white/10"
+            title="Sign Out"
+          >
+            <LogOut size={15} />
+          </button>
+        </div>
+      )}
+
       <button
         onClick={onNewChat}
-        className="mt-3.5 flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl bg-accent/20 hover:bg-accent/30 border border-accent/40 text-white font-medium text-[13px] transition-all duration-200 shadow-sm hover:shadow-[0_0_20px_-4px_rgba(124,140,255,0.4)]"
+        className="mt-3 flex items-center justify-center gap-2 w-full py-2.5 px-3 rounded-xl bg-accent/20 hover:bg-accent/30 border border-accent/40 text-white font-medium text-[13px] transition-all duration-200 shadow-sm hover:shadow-[0_0_20px_-4px_rgba(124,140,255,0.4)]"
       >
         <Plus size={16} /> New Chat
       </button>
@@ -91,12 +112,15 @@ function SidebarHistory({ isOpen, onClose, chats, activeChatId, onSelectChat, on
 }
 
 // ---------------------------------------------------------------------------
-// API helpers for chat persistence
+// API helpers for chat persistence (scoped by userEmail header)
 // ---------------------------------------------------------------------------
 
-async function fetchChats() {
+async function fetchChats(userEmail) {
+  if (!userEmail) return [];
   try {
-    const res = await fetch("/api/chats");
+    const res = await fetch("/api/chats", {
+      headers: { "x-user-email": userEmail },
+    });
     const data = await res.json();
     return data.success ? data.chats : [];
   } catch {
@@ -104,9 +128,12 @@ async function fetchChats() {
   }
 }
 
-async function fetchChatById(chatId) {
+async function fetchChatById(chatId, userEmail) {
+  if (!chatId || !userEmail) return null;
   try {
-    const res = await fetch(`/api/chats/${chatId}`);
+    const res = await fetch(`/api/chats/${chatId}`, {
+      headers: { "x-user-email": userEmail },
+    });
     const data = await res.json();
     return data.success ? data.chat : null;
   } catch {
@@ -114,11 +141,15 @@ async function fetchChatById(chatId) {
   }
 }
 
-async function apiCreateChat(chatId, title) {
+async function apiCreateChat(chatId, title, userEmail) {
+  if (!userEmail) return null;
   try {
     const res = await fetch("/api/chats", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-user-email": userEmail,
+      },
       body: JSON.stringify({ chatId, title, messages: [] }),
     });
     const data = await res.json();
@@ -128,21 +159,29 @@ async function apiCreateChat(chatId, title) {
   }
 }
 
-async function apiUpdateChat(chatId, update) {
+async function apiUpdateChat(chatId, update, userEmail) {
+  if (!userEmail) return;
   try {
     await fetch(`/api/chats/${chatId}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-user-email": userEmail,
+      },
       body: JSON.stringify(update),
     });
   } catch {
-    // silent fail — next load will reconcile
+    // silent fail
   }
 }
 
-async function apiDeleteChat(chatId) {
+async function apiDeleteChat(chatId, userEmail) {
+  if (!userEmail) return;
   try {
-    await fetch(`/api/chats/${chatId}`, { method: "DELETE" });
+    await fetch(`/api/chats/${chatId}`, {
+      method: "DELETE",
+      headers: { "x-user-email": userEmail },
+    });
   } catch {
     // silent fail
   }
@@ -153,15 +192,38 @@ async function apiDeleteChat(chatId) {
 // ---------------------------------------------------------------------------
 
 export default function App() {
-  const [chatList, setChatList] = useState([]); // summary list from API
-  const [activeChat, setActiveChat] = useState(null); // full chat with messages
+  const [user, setUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem("text_to_sql_user");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [chatList, setChatList] = useState([]);
+  const [activeChat, setActiveChat] = useState(null);
   const [activeChatId, setActiveChatId] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [loadingChats, setLoadingChats] = useState(true);
 
+  function handleLogin(userData) {
+    setUser(userData);
+    localStorage.setItem("text_to_sql_user", JSON.stringify(userData));
+  }
+
+  function handleLogout() {
+    setUser(null);
+    localStorage.removeItem("text_to_sql_user");
+    setChatList([]);
+    setActiveChat(null);
+    setActiveChatId("");
+  }
+
   const handleNewChat = useCallback(async () => {
+    if (!user) return null;
     const id = genChatId();
-    const serverChat = await apiCreateChat(id, "New Chat");
+    const serverChat = await apiCreateChat(id, "New Chat", user.email);
     const chat = serverChat || {
       chatId: id,
       title: "New Chat",
@@ -176,11 +238,16 @@ export default function App() {
     setActiveChatId(chat.chatId);
     setActiveChat(chat);
     return chat;
-  }, []);
+  }, [user]);
 
-  // Load chat list on mount
+  // Load chat list when user changes / logs in
   useEffect(() => {
-    fetchChats().then((chats) => {
+    if (!user) {
+      setLoadingChats(false);
+      return;
+    }
+    setLoadingChats(true);
+    fetchChats(user.email).then((chats) => {
       setLoadingChats(false);
       if (chats && chats.length > 0) {
         setChatList(chats);
@@ -189,25 +256,25 @@ export default function App() {
         handleNewChat();
       }
     });
-  }, [handleNewChat]);
+  }, [user, handleNewChat]);
 
-  // Load full active chat when activeChatId changes
+  // Load full active chat when activeChatId or user changes
   useEffect(() => {
-    if (!activeChatId) return;
-    fetchChatById(activeChatId).then((chat) => {
+    if (!activeChatId || !user) return;
+    fetchChatById(activeChatId, user.email).then((chat) => {
       if (chat) {
         setActiveChat(chat);
       } else {
-        // Fallback local state if chat isn't on server yet
         setActiveChat((prev) => (prev?.chatId === activeChatId ? prev : { chatId: activeChatId, title: "New Chat", messages: [] }));
       }
     });
-  }, [activeChatId]);
+  }, [activeChatId, user]);
 
   const handleDeleteChat = useCallback(
     async (e, chatId) => {
       e.stopPropagation();
-      await apiDeleteChat(chatId);
+      if (!user) return;
+      await apiDeleteChat(chatId, user.email);
       setChatList((prev) => {
         const updated = prev.filter((c) => c.chatId !== chatId);
         if (activeChatId === chatId) {
@@ -224,12 +291,13 @@ export default function App() {
         return updated;
       });
     },
-    [activeChatId]
+    [activeChatId, user]
   );
 
   // Called by ChatInterface when messages change
   const handleChatUpdate = useCallback(
     async (update) => {
+      if (!user) return;
       let targetId = activeChatId;
       if (!targetId) {
         const created = await handleNewChat();
@@ -239,39 +307,47 @@ export default function App() {
       if (update.title) {
         setChatList((prev) => prev.map((c) => (c.chatId === targetId ? { ...c, title: update.title } : c)));
       }
-      await apiUpdateChat(targetId, update);
+      await apiUpdateChat(targetId, update, user.email);
     },
-    [activeChatId, handleNewChat]
+    [activeChatId, handleNewChat, user]
   );
 
   return (
     <div className="relative min-h-screen bg-space flex items-center justify-center p-4 md:p-6 overflow-hidden">
       <FullscreenBackground />
 
-      <SidebarHistory
-        isOpen={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        chats={chatList}
-        activeChatId={activeChatId}
-        onSelectChat={(id) => setActiveChatId(id)}
-        onNewChat={handleNewChat}
-        onDeleteChat={handleDeleteChat}
-        loading={loadingChats}
-      />
+      {!user ? (
+        <AuthModal onLogin={handleLogin} />
+      ) : (
+        <>
+          <SidebarHistory
+            isOpen={sidebarOpen}
+            onClose={() => setSidebarOpen(false)}
+            chats={chatList}
+            activeChatId={activeChatId}
+            onSelectChat={(id) => setActiveChatId(id)}
+            onNewChat={handleNewChat}
+            onDeleteChat={handleDeleteChat}
+            loading={loadingChats}
+            user={user}
+            onLogout={handleLogout}
+          />
 
-      <div
-        className={`relative z-10 w-full max-w-2xl transition-all duration-300 ${
-          sidebarOpen ? "lg:ml-72" : "ml-0"
-        }`}
-      >
-        <ChatInterface
-          activeChat={activeChat}
-          onChatUpdate={handleChatUpdate}
-          onEnsureActiveChat={handleNewChat}
-          sidebarOpen={sidebarOpen}
-          onToggleSidebar={() => setSidebarOpen((s) => !s)}
-        />
-      </div>
+          <div
+            className={`relative z-10 w-full max-w-2xl transition-all duration-300 ${
+              sidebarOpen ? "lg:ml-72" : "ml-0"
+            }`}
+          >
+            <ChatInterface
+              activeChat={activeChat}
+              onChatUpdate={handleChatUpdate}
+              onEnsureActiveChat={handleNewChat}
+              sidebarOpen={sidebarOpen}
+              onToggleSidebar={() => setSidebarOpen((s) => !s)}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }
