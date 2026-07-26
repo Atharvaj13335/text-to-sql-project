@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-drift,
+  .animate-glow-pulse {
+    animation: none !important;
+  }
+}
