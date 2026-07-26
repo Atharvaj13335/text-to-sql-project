@@ -112,15 +112,19 @@ function SidebarHistory({ isOpen, onClose, chats, activeChatId, onSelectChat, on
 }
 
 // ---------------------------------------------------------------------------
-// API helpers for chat persistence (scoped by userEmail header)
+// API helpers — now use JWT Authorization header
 // ---------------------------------------------------------------------------
 
-async function fetchChats(userEmail) {
-  if (!userEmail) return [];
+function authHeaders(token) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
+
+async function fetchChats(token) {
+  if (!token) return [];
   try {
-    const res = await fetch("/api/chats", {
-      headers: { "x-user-email": userEmail },
-    });
+    const res = await fetch("/api/chats", { headers: authHeaders(token) });
     const data = await res.json();
     return data.success ? data.chats : [];
   } catch {
@@ -128,12 +132,10 @@ async function fetchChats(userEmail) {
   }
 }
 
-async function fetchChatById(chatId, userEmail) {
-  if (!chatId || !userEmail) return null;
+async function fetchChatById(chatId, token) {
+  if (!chatId || !token) return null;
   try {
-    const res = await fetch(`/api/chats/${chatId}`, {
-      headers: { "x-user-email": userEmail },
-    });
+    const res = await fetch(`/api/chats/${chatId}`, { headers: authHeaders(token) });
     const data = await res.json();
     return data.success ? data.chat : null;
   } catch {
@@ -141,15 +143,12 @@ async function fetchChatById(chatId, userEmail) {
   }
 }
 
-async function apiCreateChat(chatId, title, userEmail) {
-  if (!userEmail) return null;
+async function apiCreateChat(chatId, title, token) {
+  if (!token) return null;
   try {
     const res = await fetch("/api/chats", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-user-email": userEmail,
-      },
+      headers: authHeaders(token),
       body: JSON.stringify({ chatId, title, messages: [] }),
     });
     const data = await res.json();
@@ -159,15 +158,12 @@ async function apiCreateChat(chatId, title, userEmail) {
   }
 }
 
-async function apiUpdateChat(chatId, update, userEmail) {
-  if (!userEmail) return;
+async function apiUpdateChat(chatId, update, token) {
+  if (!token) return;
   try {
     await fetch(`/api/chats/${chatId}`, {
       method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        "x-user-email": userEmail,
-      },
+      headers: authHeaders(token),
       body: JSON.stringify(update),
     });
   } catch {
@@ -175,12 +171,12 @@ async function apiUpdateChat(chatId, update, userEmail) {
   }
 }
 
-async function apiDeleteChat(chatId, userEmail) {
-  if (!userEmail) return;
+async function apiDeleteChat(chatId, token) {
+  if (!token) return;
   try {
     await fetch(`/api/chats/${chatId}`, {
       method: "DELETE",
-      headers: { "x-user-email": userEmail },
+      headers: authHeaders(token),
     });
   } catch {
     // silent fail
@@ -221,9 +217,9 @@ export default function App() {
   }
 
   const handleNewChat = useCallback(async () => {
-    if (!user) return null;
+    if (!user?.token) return null;
     const id = genChatId();
-    const serverChat = await apiCreateChat(id, "New Chat", user.email);
+    const serverChat = await apiCreateChat(id, "New Chat", user.token);
     const chat = serverChat || {
       chatId: id,
       title: "New Chat",
@@ -240,14 +236,14 @@ export default function App() {
     return chat;
   }, [user]);
 
-  // Load chat list when user changes / logs in
+  // Load chat list when user logs in
   useEffect(() => {
-    if (!user) {
+    if (!user?.token) {
       setLoadingChats(false);
       return;
     }
     setLoadingChats(true);
-    fetchChats(user.email).then((chats) => {
+    fetchChats(user.token).then((chats) => {
       setLoadingChats(false);
       if (chats && chats.length > 0) {
         setChatList(chats);
@@ -258,10 +254,10 @@ export default function App() {
     });
   }, [user, handleNewChat]);
 
-  // Load full active chat when activeChatId or user changes
+  // Load full active chat when activeChatId changes
   useEffect(() => {
-    if (!activeChatId || !user) return;
-    fetchChatById(activeChatId, user.email).then((chat) => {
+    if (!activeChatId || !user?.token) return;
+    fetchChatById(activeChatId, user.token).then((chat) => {
       if (chat) {
         setActiveChat(chat);
       } else {
@@ -273,8 +269,8 @@ export default function App() {
   const handleDeleteChat = useCallback(
     async (e, chatId) => {
       e.stopPropagation();
-      if (!user) return;
-      await apiDeleteChat(chatId, user.email);
+      if (!user?.token) return;
+      await apiDeleteChat(chatId, user.token);
       setChatList((prev) => {
         const updated = prev.filter((c) => c.chatId !== chatId);
         if (activeChatId === chatId) {
@@ -294,10 +290,9 @@ export default function App() {
     [activeChatId, user]
   );
 
-  // Called by ChatInterface when messages change
   const handleChatUpdate = useCallback(
     async (update) => {
-      if (!user) return;
+      if (!user?.token) return;
       let targetId = activeChatId;
       if (!targetId) {
         const created = await handleNewChat();
@@ -307,7 +302,7 @@ export default function App() {
       if (update.title) {
         setChatList((prev) => prev.map((c) => (c.chatId === targetId ? { ...c, title: update.title } : c)));
       }
-      await apiUpdateChat(targetId, update, user.email);
+      await apiUpdateChat(targetId, update, user.token);
     },
     [activeChatId, handleNewChat, user]
   );

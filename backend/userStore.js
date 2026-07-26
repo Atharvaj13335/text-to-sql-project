@@ -4,9 +4,9 @@ const userSchema = new mongoose.Schema(
   {
     email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
     name: { type: String, default: "" },
-    password: { type: String, default: "" }, // plain text for demo; use bcrypt in production
+    password: { type: String, default: "" },
     mobile: { type: String, default: "" },
-    provider: { type: String, default: "password" }, // 'password' | 'email-otp' | 'mobile-otp' | 'google'
+    provider: { type: String, default: "password" },
     avatar: { type: String, default: "" },
     lastLogin: { type: Date, default: Date.now },
   },
@@ -16,17 +16,79 @@ const userSchema = new mongoose.Schema(
 const User = mongoose.model("User", userSchema);
 
 // ---------------------------------------------------------------------------
-// User CRUD Helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
-/** Find or create a user by email. Returns user object. */
-export async function findOrCreateUser({ email, name, password, mobile, provider, avatar }) {
-  if (!email) throw new Error("Email is required.");
+function sanitizeUser(user) {
+  return {
+    email: user.email,
+    name: user.name,
+    mobile: user.mobile || "",
+    provider: user.provider,
+    avatar: user.avatar,
+    createdAt: user.createdAt,
+    lastLogin: user.lastLogin,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Sign Up — rejects if account already exists
+// ---------------------------------------------------------------------------
+export async function registerUser({ email, name, password, mobile, provider, avatar }) {
+  if (!email) throw { status: 400, message: "Email is required." };
+
+  const existing = await User.findOne({ email: email.toLowerCase() });
+  if (existing) {
+    throw { status: 409, message: "Account already registered with this email. Please sign in instead." };
+  }
+
+  const user = new User({
+    email: email.toLowerCase(),
+    name: name || email.split("@")[0],
+    password: password || "",
+    mobile: mobile || "",
+    provider: provider || "password",
+    avatar: avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(email)}`,
+    lastLogin: new Date(),
+  });
+  await user.save();
+  return sanitizeUser(user);
+}
+
+// ---------------------------------------------------------------------------
+// Sign In — rejects if account doesn't exist
+// ---------------------------------------------------------------------------
+export async function loginUser(email, password) {
+  if (!email) throw { status: 400, message: "Email is required." };
+  if (!password) throw { status: 400, message: "Password is required." };
+
+  const user = await User.findOne({ email: email.toLowerCase() });
+  if (!user) {
+    throw { status: 404, message: "No account found with this email. Please sign up first." };
+  }
+
+  if (!user.password) {
+    throw { status: 401, message: "This account was registered via Google/OTP. Please use that method to sign in, or set a password via Sign Up." };
+  }
+
+  if (user.password !== password) {
+    throw { status: 401, message: "Incorrect password. Please try again." };
+  }
+
+  user.lastLogin = new Date();
+  await user.save();
+  return sanitizeUser(user);
+}
+
+// ---------------------------------------------------------------------------
+// Google / OTP Sign In — find or create (used for social/OTP login)
+// ---------------------------------------------------------------------------
+export async function findOrCreateUser({ email, name, mobile, provider, avatar }) {
+  if (!email) throw { status: 400, message: "Email is required." };
 
   let user = await User.findOne({ email: email.toLowerCase() });
 
   if (user) {
-    // Update last login & any new fields
     user.lastLogin = new Date();
     if (name && !user.name) user.name = name;
     if (mobile && !user.mobile) user.mobile = mobile;
@@ -34,82 +96,26 @@ export async function findOrCreateUser({ email, name, password, mobile, provider
     if (provider) user.provider = provider;
     await user.save();
   } else {
-    // Create new user
     user = new User({
       email: email.toLowerCase(),
       name: name || email.split("@")[0],
-      password: password || "",
       mobile: mobile || "",
-      provider: provider || "password",
-      avatar: avatar || "",
+      provider: provider || "google",
+      avatar: avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(email)}`,
       lastLogin: new Date(),
     });
     await user.save();
   }
 
-  return {
-    email: user.email,
-    name: user.name,
-    mobile: user.mobile,
-    provider: user.provider,
-    avatar: user.avatar,
-    createdAt: user.createdAt,
-    lastLogin: user.lastLogin,
-  };
+  return sanitizeUser(user);
 }
 
-/** Validate password login — returns user or null. */
-export async function validatePasswordLogin(email, password) {
-  if (!email || !password) return null;
-  const user = await User.findOne({ email: email.toLowerCase() });
-
-  if (!user) {
-    // Auto-register new user with password
-    const newUser = new User({
-      email: email.toLowerCase(),
-      name: email.split("@")[0],
-      password,
-      provider: "password",
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(email)}`,
-      lastLogin: new Date(),
-    });
-    await newUser.save();
-    return {
-      email: newUser.email,
-      name: newUser.name,
-      provider: newUser.provider,
-      avatar: newUser.avatar,
-    };
-  }
-
-  // If user exists but has no password set yet (registered via OTP/Google), set it now
-  if (!user.password) {
-    user.password = password;
-    user.lastLogin = new Date();
-    await user.save();
-    return { email: user.email, name: user.name, provider: user.provider, avatar: user.avatar };
-  }
-
-  // Validate password
-  if (user.password !== password) return null;
-
-  user.lastLogin = new Date();
-  await user.save();
-  return { email: user.email, name: user.name, provider: user.provider, avatar: user.avatar };
-}
-
-/** Get user profile by email. */
+// ---------------------------------------------------------------------------
+// Get user profile by email
+// ---------------------------------------------------------------------------
 export async function getUserByEmail(email) {
   if (!email) return null;
   const user = await User.findOne({ email: email.toLowerCase() }).lean();
   if (!user) return null;
-  return {
-    email: user.email,
-    name: user.name,
-    mobile: user.mobile,
-    provider: user.provider,
-    avatar: user.avatar,
-    createdAt: user.createdAt,
-    lastLogin: user.lastLogin,
-  };
+  return sanitizeUser(user);
 }

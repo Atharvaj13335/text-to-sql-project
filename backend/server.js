@@ -7,7 +7,7 @@ import { getPool } from "./db.js";
 import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
 import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
 import { getAllChats, getChatById, createChat, updateChat, deleteChat } from "./chatStore.js";
-import { findOrCreateUser, validatePasswordLogin, getUserByEmail } from "./userStore.js";
+import { registerUser, loginUser, findOrCreateUser, getUserByEmail } from "./userStore.js";
 
 const app = express();
 app.use(cors());
@@ -178,48 +178,60 @@ app.post("/api/execute-sql", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Auth routes (MongoDB User persistence)
+// Auth routes (JWT Token-Based)
 // ---------------------------------------------------------------------------
 
-// Password login (auto-registers if new user)
-app.post("/api/auth/login", async (req, res) => {
+import { generateToken, authMiddleware } from "./authMiddleware.js";
+
+// Sign Up — rejects if account already exists
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { email, name, password, mobile, provider, avatar } = req.body;
+    const user = await registerUser({ email, name, password, mobile, provider, avatar });
+    const token = generateToken(user);
+    res.json({ success: true, user, token });
+  } catch (err) {
+    const status = err.status || 500;
+    const message = err.message || "Registration failed.";
+    console.error("POST /api/auth/signup error:", message);
+    res.status(status).json({ success: false, error: message });
+  }
+});
+
+// Sign In — rejects if account doesn't exist
+app.post("/api/auth/signin", async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ success: false, error: "Email and password are required." });
-    }
-    const user = await validatePasswordLogin(email, password);
-    if (!user) {
-      return res.status(401).json({ success: false, error: "Invalid email or password." });
-    }
-    res.json({ success: true, user });
+    const user = await loginUser(email, password);
+    const token = generateToken(user);
+    res.json({ success: true, user, token });
   } catch (err) {
-    console.error("POST /api/auth/login error:", err);
-    res.status(500).json({ success: false, error: "Authentication failed." });
+    const status = err.status || 500;
+    const message = err.message || "Authentication failed.";
+    console.error("POST /api/auth/signin error:", message);
+    res.status(status).json({ success: false, error: message });
   }
 });
 
-// OTP / Google sign-in (find or create user)
-app.post("/api/auth/register", async (req, res) => {
+// Google / OTP sign-in — find or create
+app.post("/api/auth/google", async (req, res) => {
   try {
     const { email, name, mobile, provider, avatar } = req.body;
-    if (!email) {
-      return res.status(400).json({ success: false, error: "Email is required." });
-    }
     const user = await findOrCreateUser({ email, name, mobile, provider, avatar });
-    res.json({ success: true, user });
+    const token = generateToken(user);
+    res.json({ success: true, user, token });
   } catch (err) {
-    console.error("POST /api/auth/register error:", err);
-    res.status(500).json({ success: false, error: "Registration failed." });
+    const status = err.status || 500;
+    const message = err.message || "Authentication failed.";
+    console.error("POST /api/auth/google error:", message);
+    res.status(status).json({ success: false, error: message });
   }
 });
 
-// Get user profile
-app.get("/api/auth/profile", async (req, res) => {
+// Get user profile (protected)
+app.get("/api/auth/profile", authMiddleware, async (req, res) => {
   try {
-    const email = req.headers["x-user-email"];
-    if (!email) return res.status(400).json({ success: false, error: "Email header required." });
-    const user = await getUserByEmail(email);
+    const user = await getUserByEmail(req.user.email);
     if (!user) return res.status(404).json({ success: false, error: "User not found." });
     res.json({ success: true, user });
   } catch (err) {
@@ -229,19 +241,14 @@ app.get("/api/auth/profile", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Chat persistence routes (MongoDB)
+// Chat persistence routes (JWT-protected)
 // ---------------------------------------------------------------------------
 
-// Helper to extract authenticated user's email from request headers
 function getUserEmail(req) {
-  const email = req.headers["x-user-email"] || req.query.userEmail || req.body?.userEmail;
-  if (!email || typeof email !== "string") {
-    return "guest@financial-assistant.com";
-  }
-  return email.trim().toLowerCase();
+  return req.user?.email || "guest@financial-assistant.com";
 }
 
-app.get("/api/chats", async (req, res) => {
+app.get("/api/chats", authMiddleware, async (req, res) => {
   try {
     const userEmail = getUserEmail(req);
     const chats = await getAllChats(userEmail);
@@ -252,20 +259,7 @@ app.get("/api/chats", async (req, res) => {
   }
 });
 
-app.post("/api/chats", async (req, res) => {
-  try {
-    const userEmail = getUserEmail(req);
-    const { chatId, title, messages } = req.body;
-    if (!chatId) return res.status(400).json({ success: false, error: "chatId is required." });
-    const chat = await createChat({ chatId, userEmail, title, messages });
-    res.status(201).json({ success: true, chat });
-  } catch (err) {
-    console.error("POST /api/chats error:", err);
-    res.status(500).json({ success: false, error: "Failed to create chat." });
-  }
-});
-
-app.get("/api/chats/:id", async (req, res) => {
+app.get("/api/chats/:id", authMiddleware, async (req, res) => {
   try {
     const userEmail = getUserEmail(req);
     const chat = await getChatById(req.params.id, userEmail);
@@ -277,10 +271,21 @@ app.get("/api/chats/:id", async (req, res) => {
   }
 });
 
-app.put("/api/chats/:id", async (req, res) => {
+app.post("/api/chats", authMiddleware, async (req, res) => {
   try {
     const userEmail = getUserEmail(req);
-    const chat = await updateChat(req.params.id, userEmail, req.body);
+    const chat = await createChat({ ...req.body, userEmail });
+    res.status(201).json({ success: true, chat });
+  } catch (err) {
+    console.error("POST /api/chats error:", err);
+    res.status(500).json({ success: false, error: "Failed to create chat." });
+  }
+});
+
+app.put("/api/chats/:id", authMiddleware, async (req, res) => {
+  try {
+    const userEmail = getUserEmail(req);
+    const chat = await updateChat(req.params.id, req.body, userEmail);
     if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true, chat });
   } catch (err) {
@@ -289,7 +294,7 @@ app.put("/api/chats/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/chats/:id", async (req, res) => {
+app.delete("/api/chats/:id", authMiddleware, async (req, res) => {
   try {
     const userEmail = getUserEmail(req);
     const deleted = await deleteChat(req.params.id, userEmail);
