@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { getPool } from "./db.js";
 import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
 import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
@@ -13,7 +13,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY from env
+const openai = new OpenAI(); // reads OPENAI_API_KEY from env
 
 const MAX_ROWS = 200;
 
@@ -53,19 +53,17 @@ app.post("/api/ask", async (req, res) => {
   }
 
   try {
-    // 1. Ask Claude to turn the question into SQL, schema-aware.
-    const completion = await anthropic.messages.create({
-      model: "claude-sonnet-5",
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: question }],
+    // 1. Ask ChatGPT to turn the question into SQL, schema-aware.
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: question },
+      ],
+      response_format: { type: "json_object" },
     });
 
-    const rawText = completion.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
-
+    const rawText = completion.choices[0]?.message?.content || "";
     const parsed = extractJson(rawText);
 
     if (!parsed.sql) {
