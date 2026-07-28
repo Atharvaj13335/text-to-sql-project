@@ -337,7 +337,16 @@ async function startServer() {
       console.warn("Embedded MongoDB failed, falling back to in-memory store:", err.message);
     }
   } finally {
-    app.listen(PORT, () => console.log(`Backend listening on http://localhost:${PORT}`));
+    const server = app.listen(PORT, () => console.log(`Backend listening on http://localhost:${PORT}`));
+    server.on("error", (err) => {
+      if (err.code === "EADDRINUSE") {
+        console.log(`\n======================================================`);
+        console.log(`Backend server is ALREADY running on http://localhost:${PORT}`);
+        console.log(`======================================================\n`);
+      } else {
+        console.error("Server error:", err);
+      }
+    });
   }
 }
 
