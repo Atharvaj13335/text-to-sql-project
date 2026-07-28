@@ -106,7 +106,6 @@ app.post("/api/ask", async (req, res) => {
     });
   } catch (error) {
     if (error instanceof SqlValidationError) {
-      // Log full detail server-side; never leak internals to the client.
       console.warn("Blocked unsafe generated SQL:", error.code, error.message);
       return res.status(422).json({
         success: false,
@@ -114,10 +113,18 @@ app.post("/api/ask", async (req, res) => {
       });
     }
 
+    if (error?.status === 401 || error?.message?.includes("API key")) {
+      console.warn("OpenAI API key error:", error.message);
+      return res.status(401).json({
+        success: false,
+        error: "OpenAI API Key is missing or invalid. Please update OPENAI_API_KEY in backend/.env with your valid key.",
+      });
+    }
+
     console.error("Text-to-SQL error:", error);
     return res.status(500).json({
       success: false,
-      error: "Something went wrong generating or running that query.",
+      error: error.message || "Something went wrong generating or running that query.",
     });
   }
 });
