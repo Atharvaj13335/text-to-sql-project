@@ -84,19 +84,26 @@ app.post("/api/ask", async (req, res) => {
       maxRows: MAX_ROWS,
     });
 
-    // 3. Execute against SQL Server using the read-only login, with a
-    //    request timeout so a runaway query can't hang the pool.
-    const pool = await getPool();
-    const request = pool.request();
-    request.timeout = 8000;
-    const result = await request.query(safeSql);
+    // 3. Attempt execution against SQL Server
+    let columns = [];
+    let rows = [];
+    let dbWarning = null;
 
-    const columns = result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [];
-    const rows = result.recordset.map((row) => Object.values(row).map(String));
+    try {
+      const pool = await getPool();
+      const request = pool.request();
+      request.timeout = 8000;
+      const result = await request.query(safeSql);
 
-    // 4. Log every executed query for auditability (who asked what, and
-    //    exactly which SQL actually ran against the database).
-    console.log(JSON.stringify({ at: new Date().toISOString(), question, sql: safeSql, tablesUsed }));
+      columns = result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [];
+      rows = result.recordset.map((row) => Object.values(row).map(String));
+    } catch (dbErr) {
+      console.warn("SQL Server unavailable or unreachable:", dbErr.message);
+      dbWarning = "SQL Server (localhost:1433) is currently unreachable. The generated T-SQL query has been validated above.";
+    }
+
+    // 4. Log query for auditability
+    console.log(JSON.stringify({ at: new Date().toISOString(), question, sql: safeSql, tablesUsed, dbWarning }));
 
     return res.status(200).json({
       success: true,
@@ -105,7 +112,8 @@ app.post("/api/ask", async (req, res) => {
       tablesUsed,
       columns,
       rows,
-      rowCount: result.recordset.length,
+      rowCount: rows.length,
+      dbWarning,
     });
   } catch (error) {
     if (error instanceof SqlValidationError) {
@@ -117,10 +125,10 @@ app.post("/api/ask", async (req, res) => {
     }
 
     if (error?.status === 401 || error?.message?.includes("API key")) {
-      console.warn("OpenAI API key error:", error.message);
+      console.warn("OpenAI / OpenRouter API key error:", error.message);
       return res.status(401).json({
         success: false,
-        error: "OpenAI API Key is missing or invalid. Please update OPENAI_API_KEY in backend/.env with your valid key.",
+        error: "OpenRouter API Key is missing or invalid. Please update OPENROUTER_API_KEY in backend/.env with your valid key.",
       });
     }
 
