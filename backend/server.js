@@ -8,6 +8,7 @@ import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
 import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
 import { getAllChats, getChatById, createChat, updateChat, deleteChat } from "./chatStore.js";
 import { registerUser, loginUser, findOrCreateUser, getUserByEmail } from "./userStore.js";
+import { getMockQueryData } from "./mockData.js";
 
 const app = express();
 app.use(cors());
@@ -99,7 +100,10 @@ app.post("/api/ask", async (req, res) => {
       rows = result.recordset.map((row) => Object.values(row).map(String));
     } catch (dbErr) {
       console.warn("SQL Server unavailable or unreachable:", dbErr.message);
-      dbWarning = "SQL Server (localhost:1433) is currently unreachable. The generated T-SQL query has been validated above.";
+      dbWarning = "SQL Server (localhost:1433) is currently unreachable. Displaying sample preview data below.";
+      const mockResult = getMockQueryData(tablesUsed, safeSql);
+      columns = mockResult.columns;
+      rows = mockResult.rows;
     }
 
     // 4. Log query for auditability
