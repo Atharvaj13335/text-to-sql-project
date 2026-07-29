@@ -13,7 +13,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const openai = new OpenAI(); // reads OPENAI_API_KEY from env
+const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+});
 
 const MAX_ROWS = 200;
 
@@ -53,9 +56,9 @@ app.post("/api/ask", async (req, res) => {
   }
 
   try {
-    // 1. Ask ChatGPT to turn the question into SQL, schema-aware.
+    // 1. Ask AI model (via OpenRouter) to turn the question into SQL, schema-aware.
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: process.env.AI_MODEL || "openai/gpt-4o-mini",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: question },
