@@ -55,19 +55,25 @@ async function generateNaturalLanguageAnswer(question, sql, columns, rows, defau
   }
 
   try {
-    const prompt = `You are a financial AI analyst answering a question directly for a user.
+    const prompt = `You are an expert financial AI analyst. Analyze the following data returned from a query and answer the user's question directly with key analytical insights.
+
 User Question: "${question}"
 SQL Executed: ${sql}
 Columns: ${columns.join(", ")}
-Data Rows (sample up to 10):
-${JSON.stringify(rows.slice(0, 10))}
+Data Rows:
+${JSON.stringify(rows.slice(0, 15))}
 
-Provide a direct, conversational, executive summary (2-3 sentences max) answering the user's question directly based on the data provided above. Mention specific key figures/names where relevant (formatted clearly). Do NOT talk about SQL syntax or database mechanics — talk directly about the business/financial data as a helpful advisor.`;
+Provide a well-formatted analysis with:
+1. **Executive Summary**: Direct 1-2 sentence answer to the user's question.
+2. **Key Data Highlights**: 2-3 bullet points calling out specific top values, totals, averages, or significant patterns in the dataset.
+3. **Analyst Takeaway**: 1 brief actionable observation based on the figures.
+
+Use plain text formatting with bullet points and bold highlights. Keep it concise, professional, and focused purely on the financial data. Do NOT mention SQL syntax or table structure.`;
 
     const completion = await openai.chat.completions.create({
       model: process.env.AI_MODEL || "openai/gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 300,
+      max_tokens: 400,
     });
 
     return completion.choices[0]?.message?.content?.trim() || defaultExplanation;
