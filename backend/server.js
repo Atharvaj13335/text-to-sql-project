@@ -9,6 +9,7 @@ import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
 import { getAllChats, getChatById, createChat, updateChat, deleteChat } from "./chatStore.js";
 import { registerUser, loginUser, findOrCreateUser, getUserByEmail } from "./userStore.js";
 import { getMockQueryData } from "./mockData.js";
+import { retrieveRelevantKnowledge } from "./knowledgeStore.js";
 
 const app = express();
 app.use(cors());
@@ -91,11 +92,20 @@ app.post("/api/ask", async (req, res) => {
   }
 
   try {
-    // 1. Ask AI model (via OpenRouter) to turn the question into SQL, schema-aware.
+    // 1. RAG Knowledge Retrieval — retrieve relevant domain/schema context matching the question
+    const ragDocs = retrieveRelevantKnowledge(question, 3);
+    const ragContextText = ragDocs.map((doc) => `[${doc.category}] ${doc.title}:\n${doc.content}`).join("\n\n");
+
+    const dynamicPrompt = `${SYSTEM_PROMPT}
+
+Retrieved Domain Knowledge & Schema Context (RAG):
+${ragContextText}`;
+
+    // 2. Ask AI model (via OpenRouter) with RAG context injected.
     const completion = await openai.chat.completions.create({
       model: process.env.AI_MODEL || "openai/gpt-4o-mini",
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
+        { role: "system", content: dynamicPrompt },
         { role: "user", content: question },
       ],
       response_format: { type: "json_object" },
@@ -108,6 +118,7 @@ app.post("/api/ask", async (req, res) => {
       return res.status(200).json({
         success: false,
         error: parsed.explanation || "I couldn't build a query for that question.",
+        ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
       });
     }
 
@@ -159,6 +170,7 @@ app.post("/api/ask", async (req, res) => {
       rows,
       rowCount: rows.length,
       dbWarning,
+      ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
     });
   } catch (error) {
     if (error instanceof SqlValidationError) {

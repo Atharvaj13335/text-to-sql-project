@@ -451,7 +451,15 @@ function Message({ role, content, onSaveSql }) {
           </>
         ) : (
           <>
-            <StatusBeacon ok={true} />
+            <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
+              <StatusBeacon ok={true} />
+              {content.ragDocs?.length > 0 && (
+                <div className="flex items-center gap-1.5 text-[10.5px] font-mono text-emerald-400/90 bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 rounded-full">
+                  <span>📚 RAG Context:</span>
+                  <span className="text-white/80">{content.ragDocs.map((d) => d.title).join(" • ")}</span>
+                </div>
+              )}
+            </div>
             {content.aiAnswer ? (
               <div className="mt-2.5 p-3.5 rounded-xl bg-accent/15 border border-accent/35 text-white shadow-sm">
                 <div className="flex items-center gap-1.5 text-accent text-[11px] font-mono uppercase tracking-wider font-semibold mb-1.5">
