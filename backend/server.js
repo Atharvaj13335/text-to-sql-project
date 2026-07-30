@@ -49,6 +49,34 @@ function extractJson(rawText) {
   }
 }
 
+async function generateNaturalLanguageAnswer(question, sql, columns, rows, defaultExplanation) {
+  if (!rows || rows.length === 0) {
+    return defaultExplanation || "No matching data records were found for your query.";
+  }
+
+  try {
+    const prompt = `You are a financial AI analyst answering a question directly for a user.
+User Question: "${question}"
+SQL Executed: ${sql}
+Columns: ${columns.join(", ")}
+Data Rows (sample up to 10):
+${JSON.stringify(rows.slice(0, 10))}
+
+Provide a direct, conversational, executive summary (2-3 sentences max) answering the user's question directly based on the data provided above. Mention specific key figures/names where relevant (formatted clearly). Do NOT talk about SQL syntax or database mechanics — talk directly about the business/financial data as a helpful advisor.`;
+
+    const completion = await openai.chat.completions.create({
+      model: process.env.AI_MODEL || "openai/gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 300,
+    });
+
+    return completion.choices[0]?.message?.content?.trim() || defaultExplanation;
+  } catch (err) {
+    console.warn("Error generating AI natural language answer:", err.message);
+    return defaultExplanation;
+  }
+}
+
 app.post("/api/ask", async (req, res) => {
   const question = req.body?.question;
 
@@ -106,12 +134,19 @@ app.post("/api/ask", async (req, res) => {
       rows = mockResult.rows;
     }
 
-    // 4. Log query for auditability
+    // 4. Generate direct natural language AI answer based on the data results
+    let aiAnswer = parsed.explanation;
+    if (columns.length > 0 && rows.length > 0) {
+      aiAnswer = await generateNaturalLanguageAnswer(question, safeSql, columns, rows, parsed.explanation);
+    }
+
+    // 5. Log query for auditability
     console.log(JSON.stringify({ at: new Date().toISOString(), question, sql: safeSql, tablesUsed, dbWarning }));
 
     return res.status(200).json({
       success: true,
       explanation: parsed.explanation,
+      aiAnswer,
       sql: safeSql,
       tablesUsed,
       columns,

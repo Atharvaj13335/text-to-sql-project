@@ -452,7 +452,24 @@ function Message({ role, content, onSaveSql }) {
         ) : (
           <>
             <StatusBeacon ok={true} />
-            <p className="text-[14px] text-white/90 mt-2 leading-relaxed">{content.explanation}</p>
+            {content.aiAnswer ? (
+              <div className="mt-2.5 p-3.5 rounded-xl bg-accent/15 border border-accent/35 text-white shadow-sm">
+                <div className="flex items-center gap-1.5 text-accent text-[11px] font-mono uppercase tracking-wider font-semibold mb-1.5">
+                  <Sparkles size={13} className="text-accent animate-pulse" />
+                  <span>AI Insights</span>
+                </div>
+                <p className="text-[14px] text-white/95 leading-relaxed">{content.aiAnswer}</p>
+              </div>
+            ) : (
+              <p className="text-[14px] text-white/90 mt-2 leading-relaxed">{content.explanation}</p>
+            )}
+
+            {content.dbWarning && (
+              <div className="mt-2.5 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-[11.5px] font-mono leading-snug">
+                ⚠️ {content.dbWarning}
+              </div>
+            )}
+
             {content.columns?.length > 0 && <ResultView columns={content.columns} rows={content.rows} />}
             {content.sql && <SqlDisclosure sql={content.sql} onSaveSql={onSaveSql} />}
           </>
