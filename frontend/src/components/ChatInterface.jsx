@@ -34,10 +34,10 @@ async function askBackend(question) {
     }
 
     const data = await res.json();
-    if (!res.ok || data.success === false) {
+    if (!res.ok || (data.success === false && !data.isConversational)) {
       throw new Error(data.error || "Request failed.");
     }
-    return data; // { explanation, sql, columns, rows }
+    return data;
   } catch (err) {
     if (err.message.includes("Unexpected token") || err.message.includes("JSON")) {
       throw new Error("Backend server is unavailable (port 3001). Please ensure the backend server is running.");
@@ -432,7 +432,7 @@ function Message({ role, content, onSaveSql }) {
     );
   }
 
-  const isError = Boolean(content.error);
+  const isError = Boolean(content.error && !content.isConversational);
   const isPlain = typeof content === "string";
 
   return (
@@ -453,7 +453,7 @@ function Message({ role, content, onSaveSql }) {
           <>
             <div className="flex items-center justify-between gap-2 flex-wrap mb-1">
               <StatusBeacon ok={true} />
-              {content.ragDocs?.length > 0 && (
+              {!content.isConversational && content.ragDocs?.length > 0 && (
                 <div className="flex items-center gap-1.5 text-[10.5px] font-mono text-emerald-400/90 bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 rounded-full">
                   <span>📚 RAG Context:</span>
                   <span className="text-white/80">{content.ragDocs.map((d) => d.title).join(" • ")}</span>
@@ -461,25 +461,27 @@ function Message({ role, content, onSaveSql }) {
               )}
             </div>
             {content.aiAnswer ? (
-              <div className="mt-2.5 p-3.5 rounded-xl bg-accent/15 border border-accent/35 text-white shadow-sm">
-                <div className="flex items-center gap-1.5 text-accent text-[11px] font-mono uppercase tracking-wider font-semibold mb-1.5">
-                  <Sparkles size={13} className="text-accent animate-pulse" />
-                  <span>AI Insights</span>
-                </div>
+              <div className={`mt-2.5 p-3.5 rounded-xl border text-white shadow-sm ${content.isConversational ? "bg-white/5 border-white/10" : "bg-accent/15 border-accent/35"}`}>
+                {!content.isConversational && (
+                  <div className="flex items-center gap-1.5 text-accent text-[11px] font-mono uppercase tracking-wider font-semibold mb-1.5">
+                    <Sparkles size={13} className="text-accent animate-pulse" />
+                    <span>AI Insights</span>
+                  </div>
+                )}
                 <p className="text-[14px] text-white/95 leading-relaxed">{content.aiAnswer}</p>
               </div>
             ) : (
               <p className="text-[14px] text-white/90 mt-2 leading-relaxed">{content.explanation}</p>
             )}
 
-            {content.dbWarning && (
+            {!content.isConversational && content.dbWarning && (
               <div className="mt-2.5 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-[11.5px] font-mono leading-snug">
                 ⚠️ {content.dbWarning}
               </div>
             )}
 
-            {content.columns?.length > 0 && <ResultView columns={content.columns} rows={content.rows} />}
-            {content.sql && <SqlDisclosure sql={content.sql} onSaveSql={onSaveSql} />}
+            {!content.isConversational && content.columns?.length > 0 && <ResultView columns={content.columns} rows={content.rows} />}
+            {!content.isConversational && content.sql && <SqlDisclosure sql={content.sql} onSaveSql={onSaveSql} />}
           </>
         )}
       </div>

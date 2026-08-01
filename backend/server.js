@@ -22,23 +22,24 @@ const openai = new OpenAI({
 
 const MAX_ROWS = 200;
 
-const SYSTEM_PROMPT = `You are a SQL Server (T-SQL) query generator for a financial reporting system.
+const SYSTEM_PROMPT = `You are an intelligent Financial Data AI Assistant capable of answering financial queries using SQL Server (T-SQL) as well as engaging in natural conversation.
 
 Rules you must always follow:
-- Only ever generate a single SELECT statement. Never generate INSERT, UPDATE, DELETE, DROP, ALTER, EXEC, MERGE, or TRUNCATE.
+- If the user greeting you (e.g. 'hi', 'hello', 'hey', 'hii') or asking a general non-database question, set "sql": null and provide a friendly, helpful conversational response in "explanation".
+- Only ever generate a single SELECT statement when querying data. Never generate INSERT, UPDATE, DELETE, DROP, ALTER, EXEC, MERGE, or TRUNCATE.
 - Only use tables and columns that appear in the schema below. Never invent column or table names.
 - Never use SELECT * — always list explicit column names.
 - Always add "TOP ${MAX_ROWS}" to the SELECT (or fewer if the user asks for a specific smaller number).
 - Use SQL Server syntax (T-SQL), not MySQL/Postgres syntax.
-- If the question cannot be answered with the given schema, return {"sql": null, "explanation": "why not"}.
+- If the question cannot be answered with the given schema, return {"sql": null, "explanation": "friendly explanation of what financial performance data is available"}.
 
 Schema:
 ${SCHEMA_DESCRIPTION}
 
 Respond with ONLY a JSON object in this exact shape, no prose and no markdown fences outside the JSON:
 {
-  "explanation": "one or two sentence plain-English summary of what the query returns",
-  "sql": "the T-SQL SELECT statement, or null if unanswerable"
+  "explanation": "friendly conversational response OR plain-English summary of what the query returns",
+  "sql": "the T-SQL SELECT statement, or null if greeting/general conversation/unanswerable"
 }`;
 
 function extractJson(rawText) {
@@ -116,8 +117,14 @@ ${ragContextText}`;
 
     if (!parsed.sql) {
       return res.status(200).json({
-        success: false,
-        error: parsed.explanation || "I couldn't build a query for that question.",
+        success: true,
+        isConversational: true,
+        explanation: parsed.explanation,
+        aiAnswer: parsed.explanation,
+        sql: null,
+        columns: [],
+        rows: [],
+        rowCount: 0,
         ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
       });
     }
