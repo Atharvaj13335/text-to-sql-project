@@ -216,63 +216,72 @@ export default function App() {
     localStorage.setItem("text_to_sql_user", JSON.stringify(userData));
   }
 
-  function handleLogout() {
+  const handleLogout = useCallback(() => {
     setUser(null);
     localStorage.removeItem("text_to_sql_user");
     setChatList([]);
     setActiveChat(null);
     setActiveChatId("");
-  }
+  }, []);
 
   const handleNewChat = useCallback(async () => {
     if (!user?.token) return null;
     const id = genChatId();
-    const serverChat = await apiCreateChat(id, "New Chat", user.token);
-    const chat = serverChat || {
+    const chat = {
       chatId: id,
       title: "New Chat",
       messages: [],
       createdAt: new Date().toISOString(),
     };
     setChatList((prev) => {
-      const exists = prev.some((c) => c.chatId === chat.chatId);
+      const exists = prev.some((c) => c.chatId === id);
       if (exists) return prev;
-      return [{ chatId: chat.chatId, title: chat.title, createdAt: chat.createdAt }, ...prev];
+      return [{ chatId: id, title: "New Chat", createdAt: chat.createdAt }, ...prev];
     });
-    setActiveChatId(chat.chatId);
+    setActiveChatId(id);
     setActiveChat(chat);
     return chat;
   }, [user]);
 
-  // Load chat list when user logs in
+  // Load chat list ONCE when user token is present
   useEffect(() => {
     if (!user?.token) {
       setLoadingChats(false);
       return;
     }
     setLoadingChats(true);
+    let isMounted = true;
     fetchChats(user.token, handleLogout).then((chats) => {
+      if (!isMounted) return;
       setLoadingChats(false);
       if (chats && chats.length > 0) {
         setChatList(chats);
         setActiveChatId(chats[0].chatId);
       } else {
-        handleNewChat();
+        const id = genChatId();
+        const initialChat = { chatId: id, title: "New Chat", messages: [], createdAt: new Date().toISOString() };
+        setChatList([initialChat]);
+        setActiveChatId(id);
+        setActiveChat(initialChat);
       }
     });
-  }, [user, handleNewChat, handleLogout]);
+    return () => { isMounted = false; };
+  }, [user?.token, handleLogout]);
 
   // Load full active chat when activeChatId changes
   useEffect(() => {
     if (!activeChatId || !user?.token) return;
+    let isMounted = true;
     fetchChatById(activeChatId, user.token, handleLogout).then((chat) => {
+      if (!isMounted) return;
       if (chat) {
         setActiveChat(chat);
       } else {
         setActiveChat((prev) => (prev?.chatId === activeChatId ? prev : { chatId: activeChatId, title: "New Chat", messages: [] }));
       }
     });
-  }, [activeChatId, user, handleLogout]);
+    return () => { isMounted = false; };
+  }, [activeChatId, user?.token, handleLogout]);
 
   const handleDeleteChat = useCallback(
     async (e, chatId) => {
