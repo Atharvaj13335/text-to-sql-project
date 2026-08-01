@@ -121,10 +121,14 @@ function authHeaders(token) {
   return headers;
 }
 
-async function fetchChats(token) {
+async function fetchChats(token, onUnauthorized) {
   if (!token) return [];
   try {
     const res = await fetch("/api/chats", { headers: authHeaders(token) });
+    if (res.status === 401 && onUnauthorized) {
+      onUnauthorized();
+      return [];
+    }
     const data = await res.json();
     return data.success ? data.chats : [];
   } catch {
@@ -132,10 +136,14 @@ async function fetchChats(token) {
   }
 }
 
-async function fetchChatById(chatId, token) {
+async function fetchChatById(chatId, token, onUnauthorized) {
   if (!chatId || !token) return null;
   try {
     const res = await fetch(`/api/chats/${chatId}`, { headers: authHeaders(token) });
+    if (res.status === 401 && onUnauthorized) {
+      onUnauthorized();
+      return null;
+    }
     const data = await res.json();
     return data.success ? data.chat : null;
   } catch {
@@ -243,7 +251,7 @@ export default function App() {
       return;
     }
     setLoadingChats(true);
-    fetchChats(user.token).then((chats) => {
+    fetchChats(user.token, handleLogout).then((chats) => {
       setLoadingChats(false);
       if (chats && chats.length > 0) {
         setChatList(chats);
@@ -252,19 +260,19 @@ export default function App() {
         handleNewChat();
       }
     });
-  }, [user, handleNewChat]);
+  }, [user, handleNewChat, handleLogout]);
 
   // Load full active chat when activeChatId changes
   useEffect(() => {
     if (!activeChatId || !user?.token) return;
-    fetchChatById(activeChatId, user.token).then((chat) => {
+    fetchChatById(activeChatId, user.token, handleLogout).then((chat) => {
       if (chat) {
         setActiveChat(chat);
       } else {
         setActiveChat((prev) => (prev?.chatId === activeChatId ? prev : { chatId: activeChatId, title: "New Chat", messages: [] }));
       }
     });
-  }, [activeChatId, user]);
+  }, [activeChatId, user, handleLogout]);
 
   const handleDeleteChat = useCallback(
     async (e, chatId) => {

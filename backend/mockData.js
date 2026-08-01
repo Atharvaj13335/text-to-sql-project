@@ -1,3 +1,8 @@
+// ============================================================================
+// Smart In-Memory SQL Query Evaluator for Mock Datasets
+// Parses basic T-SQL SELECT statements (WHERE, JOIN, ORDER BY, TOP N, SELECT columns)
+// so query results accurately filter down to specific accounts/composites.
+// ============================================================================
 
 export const MOCK_BENCHMARKS = [
   { BenchmarkID: 1, BenchmarkName: "S&P 500 Index", BenchmarkReturn: 14.50 },
@@ -27,22 +32,148 @@ export const MOCK_ACCOUNTS = [
 ];
 
 export function getMockQueryData(tablesUsed = [], sqlString = "") {
-  let dataset = [];
+  if (!sqlString) return getDefaultMock(tablesUsed);
 
-  if (tablesUsed.includes("Account")) {
-    dataset = MOCK_ACCOUNTS;
-  } else if (tablesUsed.includes("CompositePerformance")) {
-    dataset = MOCK_COMPOSITES;
-  } else if (tablesUsed.includes("Benchmark")) {
-    dataset = MOCK_BENCHMARKS;
-  } else {
-    dataset = MOCK_ACCOUNTS;
+  try {
+    // 1. Determine base dataset & joins
+    let rawRows = [];
+
+    const isJoin = /JOIN/i.test(sqlString);
+    if (isJoin) {
+      // Build joined dataset Account + CompositePerformance + Benchmark
+      rawRows = MOCK_ACCOUNTS.map((acc) => {
+        const comp = MOCK_COMPOSITES.find((c) => c.CompositeID === acc.CompositeID) || {};
+        const bench = MOCK_BENCHMARKS.find((b) => b.BenchmarkID === comp.BenchmarkID) || {};
+        return { ...acc, ...comp, ...bench };
+      });
+    } else if (tablesUsed.includes("Account")) {
+      rawRows = MOCK_ACCOUNTS.map((a) => ({ ...a }));
+    } else if (tablesUsed.includes("CompositePerformance")) {
+      rawRows = MOCK_COMPOSITES.map((c) => ({ ...c }));
+    } else if (tablesUsed.includes("Benchmark")) {
+      rawRows = MOCK_BENCHMARKS.map((b) => ({ ...b }));
+    } else {
+      rawRows = MOCK_ACCOUNTS.map((a) => ({ ...a }));
+    }
+
+    let filtered = [...rawRows];
+
+    // 2. WHERE Clause Filter
+    const whereMatch = sqlString.match(/WHERE\s+([\s\S]+?)(?:ORDER\s+BY|GROUP\s+BY|$)/i);
+    if (whereMatch) {
+      const whereClause = whereMatch[1].trim();
+
+      // Check string equality / LIKE: e.g. AccountName = 'Alpha Tech Ventures Account' or AccountName LIKE '%Tech%'
+      const strEqualMatch = whereClause.match(/([a-zA-Z0-9_]+)\s*(=|LIKE)\s*'([^']+)'/i);
+      if (strEqualMatch) {
+        const [, col, op, val] = strEqualMatch;
+        filtered = filtered.filter((row) => {
+          const rowVal = String(row[col] || row[getColNameWithoutAlias(col)] || "").toLowerCase();
+          const targetVal = val.toLowerCase().replace(/%/g, "");
+          if (op.toUpperCase() === "LIKE") {
+            return rowVal.includes(targetVal);
+          }
+          return rowVal === targetVal;
+        });
+      }
+
+      // Check numeric comparisons: e.g. YTDReturn > 10
+      const numCompMatch = whereClause.match(/([a-zA-Z0-9_]+)\s*(>|<|>=|<=|=)\s*(\d+(?:\.\d+)?)/i);
+      if (numCompMatch && !strEqualMatch) {
+        const [, col, op, numStr] = numCompMatch;
+        const targetNum = parseFloat(numStr);
+        filtered = filtered.filter((row) => {
+          const val = parseFloat(row[col] || row[getColNameWithoutAlias(col)]);
+          if (isNaN(val)) return true;
+          if (op === ">") return val > targetNum;
+          if (op === "<") return val < targetNum;
+          if (op === ">=") return val >= targetNum;
+          if (op === "<=") return val <= targetNum;
+          if (op === "=") return val === targetNum;
+          return true;
+        });
+      }
+    }
+
+    // 3. ORDER BY Clause
+    const orderMatch = sqlString.match(/ORDER\s+BY\s+([a-zA-Z0-9_\.]+)(?:\s+(ASC|DESC))?/i);
+    if (orderMatch) {
+      const col = getColNameWithoutAlias(orderMatch[1]);
+      const dir = (orderMatch[2] || "ASC").toUpperCase();
+      filtered.sort((a, b) => {
+        let valA = a[col] ?? 0;
+        let valB = b[col] ?? 0;
+        if (typeof valA === "string" && !isNaN(Number(valA))) valA = Number(valA);
+        if (typeof valB === "string" && !isNaN(Number(valB))) valB = Number(valB);
+
+        if (valA < valB) return dir === "ASC" ? -1 : 1;
+        if (valA > valB) return dir === "ASC" ? 1 : -1;
+        return 0;
+      });
+    }
+
+    // 4. TOP N Limit Clause
+    const topMatch = sqlString.match(/SELECT\s+TOP\s+(\d+)/i);
+    if (topMatch) {
+      const limit = parseInt(topMatch[1], 10);
+      if (limit > 0 && limit < filtered.length) {
+        filtered = filtered.slice(0, limit);
+      }
+    }
+
+    // 5. Select Column Projection
+    const selectMatch = sqlString.match(/SELECT\s+(?:TOP\s+\d+\s+)?([\s\S]+?)\s+FROM/i);
+    let targetColumns = [];
+    if (selectMatch) {
+      const colsPart = selectMatch[1];
+      const rawCols = colsPart.split(",").map((c) => c.trim());
+
+      rawCols.forEach((c) => {
+        // Handle alias: e.g. SUM(MarketValue) AS TotalMarketValue or c.CompositeName AS Name
+        const aliasMatch = c.match(/(?:AS\s+)?([a-zA-Z0-9_]+)$/i);
+        const colName = getColNameWithoutAlias(c);
+
+        if (aliasMatch) {
+          targetColumns.push(aliasMatch[1]);
+        } else if (colName && colName !== "*") {
+          targetColumns.push(colName);
+        }
+      });
+    }
+
+    if (filtered.length === 0) return { columns: targetColumns.length > 0 ? targetColumns : ["Info"], rows: [] };
+
+    // Format output columns & rows
+    const columns = targetColumns.length > 0 ? targetColumns : Object.keys(filtered[0]);
+    const rows = filtered.map((item) => {
+      if (targetColumns.length > 0) {
+        return targetColumns.map((col) => {
+          const val = item[col] ?? item[getColNameWithoutAlias(col)] ?? "N/A";
+          return String(val);
+        });
+      }
+      return Object.values(item).map(String);
+    });
+
+    return { columns, rows };
+  } catch (err) {
+    console.warn("Smart mock SQL parsing fallback:", err.message);
+    return getDefaultMock(tablesUsed);
   }
+}
 
-  if (dataset.length === 0) return { columns: [], rows: [] };
+function getColNameWithoutAlias(colStr = "") {
+  const cleaned = colStr.replace(/^(?:SUM|AVG|COUNT|MIN|MAX)\(([^)]+)\)/i, "$1").trim();
+  const parts = cleaned.split(".");
+  return parts[parts.length - 1].trim();
+}
+
+function getDefaultMock(tablesUsed) {
+  let dataset = MOCK_ACCOUNTS;
+  if (tablesUsed.includes("CompositePerformance")) dataset = MOCK_COMPOSITES;
+  else if (tablesUsed.includes("Benchmark")) dataset = MOCK_BENCHMARKS;
 
   const columns = Object.keys(dataset[0]);
   const rows = dataset.map((item) => Object.values(item).map(String));
-
   return { columns, rows };
 }
