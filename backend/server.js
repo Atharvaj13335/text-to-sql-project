@@ -73,21 +73,32 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
     return "No matching financial records were found for your query.";
   }
 
-  const nameIdx = columns.findIndex((c) => /name|composite|account|benchmark/i.test(c));
-  const valIdx = columns.findIndex((c) => /return|marketvalue|value|aum|count/i.test(c));
+  // Exclude ID columns (e.g. AccountID, CompositeID) when finding descriptive name column
+  let nameIdx = columns.findIndex((c) => /name/i.test(c) && !/id$/i.test(c));
+  if (nameIdx === -1) {
+    nameIdx = columns.findIndex((c) => !/id$/i.test(c) && !/date$/i.test(c));
+  }
+  if (nameIdx === -1) nameIdx = 0;
 
-  if (nameIdx !== -1 && valIdx !== -1) {
+  // Find numeric metric column (e.g. MarketValue, YTDReturn, AUM, Count), ignoring IDs
+  let valIdx = columns.findIndex((c) => /return|marketvalue|value|aum|count|total/i.test(c) && !/id$/i.test(c));
+  if (valIdx === -1) {
+    valIdx = columns.findIndex((c, i) => i !== nameIdx && !/id$/i.test(c) && !/date$/i.test(c));
+  }
+
+  if (nameIdx !== -1 && valIdx !== -1 && nameIdx !== valIdx) {
     const topItem = rows[0];
     const topName = topItem[nameIdx];
-    const topVal = topItem[valIdx];
+    const rawVal = topItem[valIdx];
 
     const isReturn = /return/i.test(columns[valIdx]);
-    const isCurrency = /marketvalue|value|aum/i.test(columns[valIdx]);
+    const isCurrency = /marketvalue|value|aum|revenue|total/i.test(columns[valIdx]);
+    const numVal = Number(rawVal);
     const formattedVal = isReturn
-      ? `${topVal}%`
-      : isCurrency
-      ? `$${Number(topVal).toLocaleString()}`
-      : topVal;
+      ? `${rawVal}%`
+      : isCurrency && !isNaN(numVal)
+      ? `$${numVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : rawVal;
 
     if (rows.length === 1) {
       return `Based on the latest financial data, **${topName}** stands at **${formattedVal}**.`;
@@ -95,18 +106,19 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
 
     const secondItem = rows[1];
     const secondName = secondItem[nameIdx];
-    const secondVal = secondItem[valIdx];
+    const secondRaw = secondItem[valIdx];
+    const numSecond = Number(secondRaw);
     const formattedSecond = isReturn
-      ? `${secondVal}%`
-      : isCurrency
-      ? `$${Number(secondVal).toLocaleString()}`
-      : secondVal;
+      ? `${secondRaw}%`
+      : isCurrency && !isNaN(numSecond)
+      ? `$${numSecond.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : secondRaw;
 
     return `Retrieved ${rows.length} records. **${topName}** leads with **${formattedVal}**, followed by **${secondName}** at **${formattedSecond}**.`;
   }
 
   if (rows.length > 0 && columns.length > 0) {
-    return `Retrieved ${rows.length} records matching "${question}". Key fields: ${columns.slice(0, 3).join(", ")}.`;
+    return `Retrieved ${rows.length} records matching "${question}".`;
   }
 
   return fallbackExplanation || `Retrieved ${rows.length} financial records.`;
