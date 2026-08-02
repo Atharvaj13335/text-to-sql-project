@@ -3,16 +3,33 @@ import express from "express";
 import cors from "cors";
 import mongoose from "mongoose";
 import OpenAI from "openai";
+import rateLimit from "express-rate-limit";
+
+import { validateEnvironment } from "./envValidator.js";
+import { logger } from "./logger.js";
 import { getPool } from "./db.js";
 import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
 import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
 import { getAllChats, getChatById, createChat, updateChat, deleteChat } from "./chatStore.js";
 import { registerUser, loginUser, findOrCreateUser, getUserByEmail } from "./userStore.js";
 import { getMockQueryData } from "./mockData.js";
-import { retrieveRelevantKnowledge } from "./knowledgeStore.js";
+import { retrieveRelevantKnowledge, seedKnowledgeBase } from "./knowledgeStore.js";
+import { logAuditEntry } from "./auditLogger.js";
+import { generateToken, authMiddleware } from "./authMiddleware.js";
+import { applyRbacConstraints, isAuthorizedForTable } from "./rbac.js";
+import { getCachedQuery, setCachedQuery } from "./queryCache.js";
+import { recordFeedback } from "./feedbackStore.js";
+import { validateBody, signupSchema, signinSchema, askSchema, executeSqlSchema } from "./validatorMiddleware.js";
+import { errorHandler } from "./errorHandler.js";
+
+// Fail fast on startup if environment variables are missing
+validateEnvironment();
 
 const app = express();
-app.use(cors());
+
+// Strict CORS Policy
+const allowedOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
+app.use(cors({ origin: allowedOrigin, credentials: true }));
 app.use(express.json());
 
 const openai = new OpenAI({
@@ -21,6 +38,24 @@ const openai = new OpenAI({
 });
 
 const MAX_ROWS = 200;
+
+// Rate limiting for auth endpoints (10 attempts / 15 mins)
+const rateLimitAuth = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: "Too many authentication attempts. Please try again after 15 minutes." },
+});
+
+// Rate limiting for AI queries (30 requests / 1 min per IP)
+const askLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: "Rate limit exceeded for query generation. Please wait a minute." },
+});
 
 const SYSTEM_PROMPT = `You are an intelligent Financial Data AI Assistant capable of answering financial queries using SQL Server (T-SQL) as well as engaging in natural conversation.
 
@@ -75,40 +110,44 @@ Use plain text formatting with bullet points and bold highlights. Keep it concis
     const completion = await openai.chat.completions.create({
       model: process.env.AI_MODEL || "openai/gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 400,
     });
 
     return completion.choices[0]?.message?.content?.trim() || defaultExplanation;
   } catch (err) {
-    console.warn("Error generating AI natural language answer:", err.message);
+    logger.warn({ err: err.message }, "Secondary natural language generation failed; returning base explanation.");
     return defaultExplanation;
   }
 }
 
-import { logAuditEntry } from "./auditLogger.js";
-import rateLimit from "express-rate-limit";
+// ---------------------------------------------------------------------------
+// Text-to-SQL Core Endpoint (Cached, Rate-limited, RBAC Enforced)
+// ---------------------------------------------------------------------------
 
-// Rate limiting for auth endpoints — 10 attempts per 15 minutes per IP
-const rateLimitAuth = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, error: "Too many authentication attempts. Please try again after 15 minutes." },
-});
-
-app.post("/api/ask", async (req, res) => {
-  const question = req.body?.question;
+app.post("/api/ask", askLimiter, validateBody(askSchema), async (req, res, next) => {
+  const { question, conversationHistory } = req.body;
   const startTime = Date.now();
   const clientIp = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
   const userEmail = req.user?.email || "anonymous";
 
-  if (!question || typeof question !== "string" || question.length > 500) {
-    return res.status(400).json({ success: false, error: "Please provide a question (max 500 characters)." });
-  }
-
   try {
-    // 1. RAG Knowledge Retrieval — retrieve relevant domain/schema context matching the question
+    // 0. Check LRU Cache
+    const cached = getCachedQuery(question);
+    if (cached && (!conversationHistory || conversationHistory.length === 0)) {
+      logger.info({ question }, "Serving query response from LRU cache.");
+      logAuditEntry({
+        userEmail,
+        ip: clientIp,
+        queryType: "TEXT_TO_SQL",
+        question,
+        sql: cached.sql,
+        executionTimeMs: Date.now() - startTime,
+        status: "SUCCESS",
+        rowCount: cached.rowCount,
+      });
+      return res.status(200).json({ ...cached, cached: true });
+    }
+
+    // 1. RAG Context & Conversation Memory Assembly
     const ragDocs = retrieveRelevantKnowledge(question, 3);
     const ragContextText = ragDocs.map((doc) => `[${doc.category}] ${doc.title}:\n${doc.content}`).join("\n\n");
 
@@ -117,13 +156,20 @@ app.post("/api/ask", async (req, res) => {
 Retrieved Domain Knowledge & Schema Context (RAG):
 ${ragContextText}`;
 
-    // 2. Ask AI model (via OpenRouter) with RAG context injected.
+    const messages = [{ role: "system", content: dynamicPrompt }];
+
+    // Incorporate multi-turn conversation memory
+    if (conversationHistory && Array.isArray(conversationHistory)) {
+      conversationHistory.slice(-4).forEach((turn) => {
+        messages.push({ role: turn.role, content: turn.content });
+      });
+    }
+    messages.push({ role: "user", content: question });
+
+    // 2. Ask AI Model
     const completion = await openai.chat.completions.create({
       model: process.env.AI_MODEL || "openai/gpt-4o-mini",
-      messages: [
-        { role: "system", content: dynamicPrompt },
-        { role: "user", content: question },
-      ],
+      messages,
       response_format: { type: "json_object" },
     });
 
@@ -142,7 +188,7 @@ ${ragContextText}`;
         rowCount: 0,
       });
 
-      return res.status(200).json({
+      const responsePayload = {
         success: true,
         isConversational: true,
         explanation: parsed.explanation,
@@ -152,16 +198,27 @@ ${ragContextText}`;
         rows: [],
         rowCount: 0,
         ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
-      });
+      };
+
+      setCachedQuery(question, responsePayload);
+      return res.status(200).json(responsePayload);
     }
 
-    // 2. Structural validation — the real gate. Throws SqlValidationError
-    const { sql: safeSql, tablesUsed } = validateAndSanitizeSql(parsed.sql, {
+    // 3. Structural SQL Safety Gate
+    const { sql: validatedSql, tablesUsed } = validateAndSanitizeSql(parsed.sql, {
       allowedTables: SCHEMA_TABLES,
       maxRows: MAX_ROWS,
     });
 
-    // 3. Attempt execution against SQL Server
+    // 4. RBAC Table & Data Restriction Check
+    const authCheck = isAuthorizedForTable(req.user, tablesUsed);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ success: false, error: authCheck.reason });
+    }
+
+    const safeSql = applyRbacConstraints(validatedSql, req.user);
+
+    // 5. Query Execution against SQL Server / Smart Mock Fallback
     let columns = [];
     let rows = [];
     let dbWarning = null;
@@ -175,20 +232,20 @@ ${ragContextText}`;
       columns = result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [];
       rows = result.recordset.map((row) => Object.values(row).map(String));
     } catch (dbErr) {
-      console.warn("SQL Server unavailable or unreachable:", dbErr.message);
+      logger.warn({ dbErr: dbErr.message }, "SQL Server unavailable; using smart mock evaluator.");
       dbWarning = "SQL Server (localhost:1433) is currently unreachable. Displaying sample preview data below.";
       const mockResult = getMockQueryData(tablesUsed, safeSql);
       columns = mockResult.columns;
       rows = mockResult.rows;
     }
 
-    // 4. Generate direct natural language AI answer based on the data results
+    // 6. Natural Language Answer Generation
     let aiAnswer = parsed.explanation;
     if (columns.length > 0 && rows.length > 0) {
       aiAnswer = await generateNaturalLanguageAnswer(question, safeSql, columns, rows, parsed.explanation);
     }
 
-    // 5. Log query for auditability into audit.jsonl
+    // 7. Audit Log Entry
     logAuditEntry({
       userEmail,
       ip: clientIp,
@@ -200,7 +257,7 @@ ${ragContextText}`;
       rowCount: rows.length,
     });
 
-    return res.status(200).json({
+    const responsePayload = {
       success: true,
       explanation: parsed.explanation,
       aiAnswer,
@@ -211,64 +268,48 @@ ${ragContextText}`;
       rowCount: rows.length,
       dbWarning,
       ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
-    });
+    };
+
+    setCachedQuery(question, responsePayload);
+    return res.status(200).json(responsePayload);
   } catch (error) {
-    const executionTimeMs = Date.now() - startTime;
     logAuditEntry({
       userEmail,
       ip: clientIp,
       queryType: "TEXT_TO_SQL",
       question,
       sql: null,
-      executionTimeMs,
+      executionTimeMs: Date.now() - startTime,
       status: "FAILURE",
       rowCount: 0,
       error: error.message,
     });
-
-    if (error instanceof SqlValidationError) {
-      console.warn("Blocked unsafe generated SQL:", error.code, error.message);
-      return res.status(422).json({
-        success: false,
-        error: "The generated query failed safety validation and was not run.",
-      });
-    }
-
-    if (error?.status === 401 || error?.message?.includes("API key")) {
-      console.warn("OpenAI / OpenRouter API key error:", error.message);
-      return res.status(401).json({
-        success: false,
-        error: "OpenRouter API Key is missing or invalid. Please update OPENROUTER_API_KEY in backend/.env with your valid key.",
-      });
-    }
-
-    console.error("Text-to-SQL error:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Something went wrong generating or running that query.",
-    });
+    next(error);
   }
 });
 
 // ---------------------------------------------------------------------------
-// Execute custom / edited SQL query (JWT-Protected)
+// Execute Custom SQL Query (JWT Protected, RBAC Checked)
 // ---------------------------------------------------------------------------
 
-app.post("/api/execute-sql", authMiddleware, async (req, res) => {
-  const customSql = req.body?.sql;
+app.post("/api/execute-sql", authMiddleware, validateBody(executeSqlSchema), async (req, res, next) => {
+  const { sql: customSql } = req.body;
   const startTime = Date.now();
   const clientIp = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
   const userEmail = req.user?.email || "anonymous";
 
-  if (!customSql || typeof customSql !== "string" || customSql.length > 2000) {
-    return res.status(400).json({ success: false, error: "Please provide a valid SQL query." });
-  }
-
   try {
-    const { sql: safeSql, tablesUsed } = validateAndSanitizeSql(customSql, {
+    const { sql: validatedSql, tablesUsed } = validateAndSanitizeSql(customSql, {
       allowedTables: SCHEMA_TABLES,
       maxRows: MAX_ROWS,
     });
+
+    const authCheck = isAuthorizedForTable(req.user, tablesUsed);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ success: false, error: authCheck.reason });
+    }
+
+    const safeSql = applyRbacConstraints(validatedSql, req.user);
 
     const pool = await getPool();
     const request = pool.request();
@@ -299,201 +340,171 @@ app.post("/api/execute-sql", authMiddleware, async (req, res) => {
       rowCount: result.recordset.length,
     });
   } catch (error) {
-    const executionTimeMs = Date.now() - startTime;
     logAuditEntry({
       userEmail,
       ip: clientIp,
       queryType: "DIRECT_EXECUTE",
       question: "User Custom SQL Execution",
       sql: customSql,
-      executionTimeMs,
+      executionTimeMs: Date.now() - startTime,
       status: "FAILURE",
       rowCount: 0,
       error: error.message,
     });
-
-    if (error instanceof SqlValidationError) {
-      console.warn("Blocked unsafe custom SQL:", error.code, error.message);
-      return res.status(422).json({
-        success: false,
-        error: `SQL Validation Error: ${error.message}`,
-      });
-    }
-
-    console.error("Custom SQL execution error:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Failed to execute modified SQL query.",
-    });
+    next(error);
   }
 });
 
 // ---------------------------------------------------------------------------
-// Auth routes (JWT Token-Based)
+// Feedback Endpoint
 // ---------------------------------------------------------------------------
 
-import { generateToken, authMiddleware } from "./authMiddleware.js";
-
-// Sign Up — rejects if account already exists
-app.post("/api/auth/signup", rateLimitAuth, async (req, res) => {
+app.post("/api/feedback", authMiddleware, async (req, res, next) => {
   try {
-    const { email, name, password, mobile, provider, avatar } = req.body;
-    const user = await registerUser({ email, name, password, mobile, provider, avatar });
+    const { chatId, question, sql, rating, comment, suggestedSql } = req.body;
+    const feedback = await recordFeedback({
+      userEmail: req.user.email,
+      chatId,
+      question,
+      sql,
+      rating,
+      comment,
+      suggestedSql,
+    });
+    res.json({ success: true, feedback });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Auth Routes (JWT Token-Based, Zod Validated, Rate Limited)
+// ---------------------------------------------------------------------------
+
+app.post("/api/auth/signup", rateLimitAuth, validateBody(signupSchema), async (req, res, next) => {
+  try {
+    const user = await registerUser(req.body);
     const token = generateToken(user);
     res.json({ success: true, user, token });
   } catch (err) {
-    const status = err.status || 500;
-    const message = err.message || "Registration failed.";
-    console.error("POST /api/auth/signup error:", message);
-    res.status(status).json({ success: false, error: message });
+    next(err);
   }
 });
 
-// Sign In — rejects if account doesn't exist
-app.post("/api/auth/signin", rateLimitAuth, async (req, res) => {
+app.post("/api/auth/signin", rateLimitAuth, validateBody(signinSchema), async (req, res, next) => {
   try {
     const { email, password } = req.body;
     const user = await loginUser(email, password);
     const token = generateToken(user);
     res.json({ success: true, user, token });
   } catch (err) {
-    const status = err.status || 500;
-    const message = err.message || "Authentication failed.";
-    console.error("POST /api/auth/signin error:", message);
-    res.status(status).json({ success: false, error: message });
+    next(err);
   }
 });
 
-// Google / OTP sign-in — find or create
-app.post("/api/auth/google", async (req, res) => {
+app.post("/api/auth/google", async (req, res, next) => {
   try {
-    const { email, name, mobile, provider, avatar } = req.body;
-    const user = await findOrCreateUser({ email, name, mobile, provider, avatar });
+    const user = await findOrCreateUser(req.body);
     const token = generateToken(user);
     res.json({ success: true, user, token });
   } catch (err) {
-    const status = err.status || 500;
-    const message = err.message || "Authentication failed.";
-    console.error("POST /api/auth/google error:", message);
-    res.status(status).json({ success: false, error: message });
+    next(err);
   }
 });
 
-// Get user profile (protected)
-app.get("/api/auth/profile", authMiddleware, async (req, res) => {
+app.get("/api/auth/profile", authMiddleware, async (req, res, next) => {
   try {
     const user = await getUserByEmail(req.user.email);
     if (!user) return res.status(404).json({ success: false, error: "User not found." });
     res.json({ success: true, user });
   } catch (err) {
-    console.error("GET /api/auth/profile error:", err);
-    res.status(500).json({ success: false, error: "Failed to load profile." });
+    next(err);
   }
 });
 
 // ---------------------------------------------------------------------------
-// Chat persistence routes (JWT-protected)
+// Chat Persistence Routes (JWT Protected)
 // ---------------------------------------------------------------------------
 
 function getUserEmail(req) {
   return req.user?.email || "guest@financial-assistant.com";
 }
 
-app.get("/api/chats", authMiddleware, async (req, res) => {
+app.get("/api/chats", authMiddleware, async (req, res, next) => {
   try {
-    const userEmail = getUserEmail(req);
-    const chats = await getAllChats(userEmail);
+    const email = getUserEmail(req);
+    const chats = await getAllChats(email);
     res.json({ success: true, chats });
   } catch (err) {
-    console.error("GET /api/chats error:", err);
-    res.status(500).json({ success: false, error: "Failed to load chats." });
+    next(err);
   }
 });
 
-app.get("/api/chats/:id", authMiddleware, async (req, res) => {
+app.get("/api/chats/:id", authMiddleware, async (req, res, next) => {
   try {
-    const userEmail = getUserEmail(req);
-    const chat = await getChatById(req.params.id, userEmail);
+    const email = getUserEmail(req);
+    const chat = await getChatById(req.params.id, email);
     if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true, chat });
   } catch (err) {
-    console.error("GET /api/chats/:id error:", err);
-    res.status(500).json({ success: false, error: "Failed to load chat." });
+    next(err);
   }
 });
 
-app.post("/api/chats", authMiddleware, async (req, res) => {
+app.post("/api/chats", authMiddleware, async (req, res, next) => {
   try {
-    const userEmail = getUserEmail(req);
-    const chat = await createChat({ ...req.body, userEmail });
-    res.status(201).json({ success: true, chat });
+    const email = getUserEmail(req);
+    const chat = await createChat(email, req.body);
+    res.json({ success: true, chat });
   } catch (err) {
-    console.error("POST /api/chats error:", err);
-    res.status(500).json({ success: false, error: "Failed to create chat." });
+    next(err);
   }
 });
 
-app.put("/api/chats/:id", authMiddleware, async (req, res) => {
+app.put("/api/chats/:id", authMiddleware, async (req, res, next) => {
   try {
-    const userEmail = getUserEmail(req);
-    const chat = await updateChat(req.params.id, userEmail, req.body);
+    const email = getUserEmail(req);
+    const chat = await updateChat(req.params.id, email, req.body);
     if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true, chat });
   } catch (err) {
-    console.error("PUT /api/chats/:id error:", err);
-    res.status(500).json({ success: false, error: "Failed to update chat." });
+    next(err);
   }
 });
 
-app.delete("/api/chats/:id", authMiddleware, async (req, res) => {
+app.delete("/api/chats/:id", authMiddleware, async (req, res, next) => {
   try {
-    const userEmail = getUserEmail(req);
-    const deleted = await deleteChat(req.params.id, userEmail);
+    const email = getUserEmail(req);
+    const deleted = await deleteChat(req.params.id, email);
     if (!deleted) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true });
   } catch (err) {
-    console.error("DELETE /api/chats/:id error:", err);
-    res.status(500).json({ success: false, error: "Failed to delete chat." });
+    next(err);
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
+// Centralized Global Express Error Handler Middleware
+app.use(errorHandler);
 
 // ---------------------------------------------------------------------------
-// Start server with MongoDB connection (Auto-spawns embedded MongoMemoryServer if needed)
+// Server Initialization
 // ---------------------------------------------------------------------------
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/text_to_sql";
 const PORT = process.env.PORT || 3001;
+const MONGO_URI = process.env.MONGO_URI;
 
-async function startServer() {
-  try {
-    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-    console.log("Connected to MongoDB at", MONGO_URI);
-  } catch {
-    console.warn("Local MongoDB instance not detected on 127.0.0.1:27017.");
-    console.log("Starting embedded local MongoDB server...");
-    try {
-      const { MongoMemoryServer } = await import("mongodb-memory-server");
-      const mongod = await MongoMemoryServer.create();
-      const embeddedUri = mongod.getUri();
-      await mongoose.connect(embeddedUri);
-      console.log("SUCCESS: Connected to Embedded Local MongoDB at", embeddedUri);
-    } catch (err) {
-      console.warn("Embedded MongoDB failed, falling back to in-memory store:", err.message);
-    }
-  } finally {
-    const server = app.listen(PORT, () => console.log(`Backend listening on http://localhost:${PORT}`));
-    server.on("error", (err) => {
-      if (err.code === "EADDRINUSE") {
-        console.log(`\n======================================================`);
-        console.log(`Backend server is ALREADY running on http://localhost:${PORT}`);
-        console.log(`======================================================\n`);
-      } else {
-        console.error("Server error:", err);
-      }
+mongoose
+  .connect(MONGO_URI)
+  .then(async () => {
+    logger.info("Connected to MongoDB Atlas successfully.");
+    await seedKnowledgeBase();
+    app.listen(PORT, () => {
+      logger.info(`🚀 Production-Hardened Financial Assistant API running on http://localhost:${PORT}`);
     });
-  }
-}
-
-startServer();
+  })
+  .catch((err) => {
+    logger.error({ err: err.message }, "MongoDB connection error. Starting server anyway...");
+    app.listen(PORT, () => {
+      logger.info(`🚀 Production-Hardened Financial Assistant API running on http://localhost:${PORT}`);
+    });
+  });

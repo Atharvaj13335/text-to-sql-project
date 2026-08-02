@@ -1,9 +1,33 @@
 // ============================================================================
-// Knowledge Base & RAG Retrieval Engine for Text-to-SQL
-// Stores domain knowledge, schema documentation, KPI formulas, and sample SQL patterns.
+// RAG Knowledge Store - MongoDB-backed, TF-IDF Scored Retrieval
 // ============================================================================
 
-export const KNOWLEDGE_BASE = [
+import mongoose from "mongoose";
+
+// ---------------------------------------------------------------------------
+// 1. MongoDB Schema for persisted knowledge documents
+// ---------------------------------------------------------------------------
+
+const knowledgeDocSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true, unique: true, index: true },
+    category: { type: String, required: true },
+    title: { type: String, required: true },
+    keywords: [{ type: String }],
+    content: { type: String, required: true },
+    // Derived at seed/insert time for fast term lookups
+    termFrequencies: { type: Map, of: Number, default: {} },
+  },
+  { timestamps: true }
+);
+
+const KnowledgeDoc = mongoose.models.KnowledgeDoc || mongoose.model("KnowledgeDoc", knowledgeDocSchema);
+
+// ---------------------------------------------------------------------------
+// 2. Static seed documents (same as original, these seed MongoDB on first run)
+// ---------------------------------------------------------------------------
+
+const SEED_DOCUMENTS = [
   {
     id: "schema_composite_performance",
     category: "Schema & Table Definition",
@@ -55,13 +79,15 @@ Columns:
 1. Total Assets Under Management (AUM) = SUM(Account.MarketValue).
 2. Average Account Value = AVG(Account.MarketValue).
 3. Best Performing Composite = SELECT TOP 1 CompositeName, YTDReturn FROM CompositePerformance ORDER BY YTDReturn DESC.
-4. Composite Return vs Benchmark = Join CompositePerformance c ON c.BenchmarkID = b.BenchmarkID to compare YTDReturn against BenchmarkReturn.`,
+4. Composite Return vs Benchmark = Join CompositePerformance c ON c.BenchmarkID = b.BenchmarkID to compare YTDReturn against BenchmarkReturn.
+5. Alpha = YTDReturn - BenchmarkReturn.
+6. Annualized Return = ((1 + TotalReturn)^(1/Years)) - 1.`,
   },
   {
     id: "sql_patterns_aggregation",
     category: "SQL Best Practices",
     title: "Aggregations and Joins T-SQL Patterns",
-    keywords: ["sql", "join", "group by", "sum", "avg", "top", "select", "query", "pattern"],
+    keywords: ["sql", "join", "group by", "sum", "avg", "top", "select", "query", "pattern", "aggregate"],
     content: `T-SQL Best Practices for Financial Queries:
 - Always use TOP 200 to cap result size.
 - For total market value by composite:
@@ -75,44 +101,214 @@ Columns:
   FROM CompositePerformance c
   JOIN Benchmark b ON c.BenchmarkID = b.BenchmarkID;`,
   },
+  {
+    id: "gips_compliance",
+    category: "Regulatory & Compliance",
+    title: "GIPS Compliance Standards for Portfolio Reporting",
+    keywords: ["gips", "compliance", "reporting", "standards", "global investment", "composite", "verification"],
+    content: `GIPS (Global Investment Performance Standards) Rules Relevant to Queries:
+- All composites must include all actual fee-paying, discretionary portfolios that meet the composite definition.
+- Returns must be calculated using time-weighted rates of return.
+- Composites must exist for at least 5 years before applying for GIPS verification.
+- Benchmark must be disclosed for each composite.
+- Carve-outs must be separately managed with their own cash allocation if included in a composite.`,
+  },
+  {
+    id: "risk_metrics",
+    category: "Domain Calculations & Rules",
+    title: "Risk & Volatility Metrics Definitions",
+    keywords: ["risk", "volatility", "sharpe", "deviation", "drawdown", "beta", "correlation", "standard deviation"],
+    content: `Financial Risk Metric Definitions:
+- Sharpe Ratio = (Portfolio Return - Risk-Free Rate) / Standard Deviation.
+- Maximum Drawdown = Largest peak-to-trough decline in portfolio value.
+- Beta = Measure of a portfolio's sensitivity to market movements (market beta = 1.0).
+- Tracking Error = Standard deviation of the difference between portfolio and benchmark returns.
+- Information Ratio = Alpha / Tracking Error.`,
+  },
 ];
 
-/**
- * Retrieve top-K relevant knowledge snippets using keyword similarity and term frequency scoring.
- */
-export function retrieveRelevantKnowledge(query, topK = 3) {
-  if (!query || typeof query !== "string") return KNOWLEDGE_BASE.slice(0, topK);
+// ---------------------------------------------------------------------------
+// 3. TF-IDF Utilities
+// ---------------------------------------------------------------------------
 
-  const cleanQuery = query.toLowerCase().replace(/[^\w\s]/g, "");
-  const words = cleanQuery.split(/\s+/).filter((w) => w.length > 2);
+function tokenize(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+}
 
-  const scored = KNOWLEDGE_BASE.map((doc) => {
-    let score = 0;
+function computeTermFrequencies(doc) {
+  const tokens = tokenize(`${doc.title} ${doc.content} ${doc.keywords.join(" ")}`);
+  const tf = {};
+  tokens.forEach((t) => {
+    tf[t] = (tf[t] || 0) + 1;
+  });
+  // Normalize by document length
+  const total = tokens.length || 1;
+  Object.keys(tf).forEach((k) => {
+    tf[k] = tf[k] / total;
+  });
+  return tf;
+}
 
-    // Check keyword matches
-    words.forEach((word) => {
-      doc.keywords.forEach((kw) => {
-        if (kw.includes(word) || word.includes(kw)) {
-          score += 3;
-        }
-      });
+function tfidfScore(queryTokens, doc, idfMap) {
+  let score = 0;
+  const tf = doc.termFrequencies instanceof Map ? Object.fromEntries(doc.termFrequencies) : doc.termFrequencies || {};
 
-      // Check title and content matches
-      if (doc.title.toLowerCase().includes(word)) score += 2;
-      if (doc.content.toLowerCase().includes(word)) score += 1;
-    });
+  queryTokens.forEach((term) => {
+    const termTf = tf[term] || 0;
+    const idf = idfMap[term] || 0;
+    score += termTf * idf;
 
-    return { ...doc, score };
+    // Bonus for keyword exact match
+    if (doc.keywords && doc.keywords.includes(term)) score += 0.5;
   });
 
-  // Sort by score descending
+  return score;
+}
+
+function computeIdf(docs, queryTokens) {
+  const idf = {};
+  const N = docs.length || 1;
+  queryTokens.forEach((term) => {
+    const docsWithTerm = docs.filter((d) => {
+      const tf = d.termFrequencies instanceof Map ? Object.fromEntries(d.termFrequencies) : d.termFrequencies || {};
+      return tf[term] !== undefined;
+    }).length;
+    idf[term] = Math.log((N + 1) / (docsWithTerm + 1)) + 1;
+  });
+  return idf;
+}
+
+// ---------------------------------------------------------------------------
+// 4. Seeding — insert seed docs into MongoDB if collection is empty
+// ---------------------------------------------------------------------------
+
+let _inMemoryCache = null;
+
+export async function seedKnowledgeBase() {
+  try {
+    if (mongoose.connection.readyState !== 1) return;
+
+    const count = await KnowledgeDoc.countDocuments();
+    if (count === 0) {
+      const docsWithTf = SEED_DOCUMENTS.map((doc) => ({
+        ...doc,
+        termFrequencies: computeTermFrequencies(doc),
+      }));
+      await KnowledgeDoc.insertMany(docsWithTf, { ordered: false });
+      console.log(`[RAG] Seeded ${docsWithTf.length} knowledge documents to MongoDB.`);
+    }
+
+    // Warm in-memory cache
+    _inMemoryCache = await KnowledgeDoc.find({}).lean();
+    console.log(`[RAG] Loaded ${_inMemoryCache.length} knowledge documents into cache.`);
+  } catch (err) {
+    console.warn("[RAG] Failed to seed/warm knowledge base from MongoDB:", err.message);
+    // Fall back to in-memory seed documents so the app still works
+    _inMemoryCache = SEED_DOCUMENTS.map((doc) => ({
+      ...doc,
+      termFrequencies: computeTermFrequencies(doc),
+    }));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Core retrieval — TF-IDF scored
+// ---------------------------------------------------------------------------
+
+export async function retrieveRelevantKnowledgeAsync(query, topK = 3) {
+  const docs = await getDocsFromCache();
+  if (!query || typeof query !== "string") return docs.slice(0, topK);
+
+  const queryTokens = tokenize(query);
+  if (queryTokens.length === 0) return docs.slice(0, topK);
+
+  const idfMap = computeIdf(docs, queryTokens);
+
+  const scored = docs.map((doc) => ({
+    id: doc.id,
+    category: doc.category,
+    title: doc.title,
+    keywords: doc.keywords,
+    content: doc.content,
+    score: tfidfScore(queryTokens, doc, idfMap),
+  }));
+
   scored.sort((a, b) => b.score - a.score);
 
-  // If no specific match found, return top default schema docs
-  const topDocs = scored.filter((d) => d.score > 0);
-  if (topDocs.length === 0) {
-    return KNOWLEDGE_BASE.slice(0, topK);
-  }
+  const relevant = scored.filter((d) => d.score > 0);
+  return (relevant.length > 0 ? relevant : scored).slice(0, topK);
+}
 
-  return topDocs.slice(0, topK);
+// Sync version for backwards-compatibility with server.js and mcpServer.js
+export function retrieveRelevantKnowledge(query, topK = 3) {
+  const docs = _inMemoryCache || SEED_DOCUMENTS.map((doc) => ({
+    ...doc,
+    termFrequencies: computeTermFrequencies(doc),
+  }));
+
+  if (!query || typeof query !== "string") return docs.slice(0, topK);
+
+  const queryTokens = tokenize(query);
+  if (queryTokens.length === 0) return docs.slice(0, topK);
+
+  const idfMap = computeIdf(docs, queryTokens);
+
+  const scored = docs.map((doc) => ({
+    id: doc.id,
+    category: doc.category,
+    title: doc.title,
+    keywords: doc.keywords,
+    content: doc.content,
+    score: tfidfScore(queryTokens, doc, idfMap),
+  }));
+
+  scored.sort((a, b) => b.score - a.score);
+  const relevant = scored.filter((d) => d.score > 0);
+  return (relevant.length > 0 ? relevant : scored).slice(0, topK);
+}
+
+// ---------------------------------------------------------------------------
+// 6. CRUD operations used by MCP tools and admin API
+// ---------------------------------------------------------------------------
+
+async function getDocsFromCache() {
+  if (_inMemoryCache) return _inMemoryCache;
+  if (mongoose.connection.readyState === 1) {
+    _inMemoryCache = await KnowledgeDoc.find({}).lean();
+    return _inMemoryCache;
+  }
+  return SEED_DOCUMENTS.map((doc) => ({ ...doc, termFrequencies: computeTermFrequencies(doc) }));
+}
+
+export async function getAllKnowledgeDocs() {
+  const docs = await getDocsFromCache();
+  return docs.map(({ id, category, title, keywords, content, createdAt }) => ({
+    id, category, title, keywords, content, createdAt,
+  }));
+}
+
+export async function getKnowledgeDocById(id) {
+  const docs = await getDocsFromCache();
+  const doc = docs.find((d) => d.id === id);
+  if (!doc) return null;
+  return { id: doc.id, category: doc.category, title: doc.title, keywords: doc.keywords, content: doc.content };
+}
+
+export async function addKnowledgeDoc({ id, category, title, keywords, content }) {
+  const tf = computeTermFrequencies({ title, content, keywords });
+  const newDoc = new KnowledgeDoc({ id, category, title, keywords, content, termFrequencies: tf });
+  await newDoc.save();
+  // Invalidate cache
+  _inMemoryCache = null;
+  return { id, category, title, keywords, content };
+}
+
+export async function deleteKnowledgeDoc(id) {
+  const result = await KnowledgeDoc.deleteOne({ id });
+  _inMemoryCache = null;
+  return result.deletedCount > 0;
 }
