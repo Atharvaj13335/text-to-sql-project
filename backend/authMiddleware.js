@@ -1,12 +1,13 @@
 import jwt from "jsonwebtoken";
-import crypto from "crypto";
 
-// Ensure JWT_SECRET is strong; generate per-boot random fallback if env var is absent
-const JWT_SECRET = (() => {
-  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
-  console.warn("⚠️  SECURITY WARNING: JWT_SECRET environment variable is not set. Generating a random secret per server instance.");
-  return crypto.randomBytes(32).toString("hex");
-})();
+// JWT_SECRET is REQUIRED — refuse to boot without it
+if (!process.env.JWT_SECRET) {
+  console.error("❌ FATAL: JWT_SECRET environment variable is not set. Server will not start.");
+  console.error("   Set it in backend/.env:  JWT_SECRET=your-strong-random-secret-here");
+  process.exit(1);
+}
+
+const JWT_SECRET = process.env.JWT_SECRET;
 
 /**
  * Generate a JWT token for a user.

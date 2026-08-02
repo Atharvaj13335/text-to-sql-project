@@ -86,24 +86,16 @@ Use plain text formatting with bullet points and bold highlights. Keep it concis
 }
 
 import { logAuditEntry } from "./auditLogger.js";
+import rateLimit from "express-rate-limit";
 
-// Rate limiting in-memory store for auth endpoints (max 10 attempts per 15 minutes per IP)
-const authAttempts = new Map();
-function rateLimitAuth(req, res, next) {
-  const ip = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
-  const now = Date.now();
-  const windowMs = 15 * 60 * 1000;
-  const attempts = authAttempts.get(ip) || [];
-  const validAttempts = attempts.filter((t) => now - t < windowMs);
-
-  if (validAttempts.length >= 10) {
-    return res.status(429).json({ success: false, error: "Too many authentication attempts. Please try again after 15 minutes." });
-  }
-
-  validAttempts.push(now);
-  authAttempts.set(ip, validAttempts);
-  next();
-}
+// Rate limiting for auth endpoints — 10 attempts per 15 minutes per IP
+const rateLimitAuth = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: "Too many authentication attempts. Please try again after 15 minutes." },
+});
 
 app.post("/api/ask", async (req, res) => {
   const question = req.body?.question;
