@@ -5,224 +5,329 @@ import mongoose from "mongoose";
 import OpenAI from "openai";
 import rateLimit from "express-rate-limit";
 
-import { validateEnvironment } from "./envValidator.js";
-import { logger } from "./logger.js";
-import { getPool } from "./db.js";
-import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
-import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
-import { getAllChats, getChatById, createChat, updateChat, deleteChat } from "./chatStore.js";
-import { registerUser, loginUser, findOrCreateUser, getUserByEmail } from "./userStore.js";
-import { getMockQueryData } from "./mockData.js";
-import { retrieveRelevantKnowledge, seedKnowledgeBase } from "./knowledgeStore.js";
-import { logAuditEntry } from "./auditLogger.js";
-import { generateToken, authMiddleware } from "./authMiddleware.js";
-import { applyRbacConstraints, isAuthorizedForTable } from "./rbac.js";
-import { getCachedQuery, setCachedQuery } from "./queryCache.js";
-import { recordFeedback } from "./feedbackStore.js";
-import { validateBody, signupSchema, signinSchema, askSchema, executeSqlSchema } from "./validatorMiddleware.js";
-import { errorHandler } from "./errorHandler.js";
-import { handleSseConnect, handleSseMessage } from "./mcpSse.js";
+import { validateEnvironment } from "./src/config/envValidator.js";
+import { logger } from "./src/utils/logger.js";
+import { getPool } from "./src/config/db.js";
+import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./src/config/schema.js";
+import { validateAndSanitizeSql, SqlValidationError } from "./src/security/validateSql.js";
+import { getAllChats, getChatById, createChat, updateChat, deleteChat } from "./src/services/chatStore.js";
+import { registerUser, loginUser, findOrCreateUser, getUserByEmail } from "./src/services/userStore.js";
+import { getMockQueryData } from "./src/services/mockData.js";
+import { retrieveRelevantKnowledge, seedKnowledgeBase } from "./src/services/knowledgeStore.js";
+import { logAuditEntry } from "./src/security/auditLogger.js";
+import { generateToken, authMiddleware } from "./src/middleware/authMiddleware.js";
+import { applyRbacConstraints, isAuthorizedForTable } from "./src/security/rbac.js";
+import { getCachedQuery, setCachedQuery } from "./src/services/queryCache.js";
+import { recordFeedback } from "./src/services/feedbackStore.js";
+import { validateBody, signupSchema, signinSchema, askSchema, executeSqlSchema } from "./src/middleware/validatorMiddleware.js";
+import { errorHandler } from "./src/middleware/errorHandler.js";
+import { handleSseConnect, handleSseMessage } from "./src/mcp/mcpSse.js";
 
 // Fail fast on startup if environment variables are missing
 validateEnvironment();
 
 const app = express();
+const PORT = process.env.PORT || 3001;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const AI_MODEL = process.env.AI_MODEL || "openai/gpt-4o-mini";
+const MONGO_URI = process.env.MONGO_URI;
 
-// Strict CORS Policy
-const allowedOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
-app.use(cors({ origin: allowedOrigin, credentials: true }));
+// Restrict CORS to authorized frontend origin in production
+const allowedOrigins = [process.env.FRONTEND_URL || "http://localhost:5173", "http://127.0.0.1:5173"];
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        logger.warn({ origin }, "Blocked CORS request from unauthorized origin");
+        callback(new Error("CORS Policy Violation: Access from this origin is prohibited."));
+      }
+    },
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 
-const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
-
-const MAX_ROWS = 200;
-
-// Rate limiting for auth endpoints (10 attempts / 15 mins)
-const rateLimitAuth = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
+// Sliding-window Rate Limiters
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: { success: false, error: "Too many login attempts. Please try again after 1 minute." },
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, error: "Too many authentication attempts. Please try again after 15 minutes." },
 });
 
-// Rate limiting for AI queries (30 requests / 1 min per IP)
 const askLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
+  message: { success: false, error: "Rate limit exceeded. Maximum 30 queries per minute permitted." },
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, error: "Rate limit exceeded for query generation. Please wait a minute." },
 });
 
-const SYSTEM_PROMPT = `You are an intelligent Financial Data AI Assistant capable of answering financial queries using SQL Server (T-SQL) as well as engaging in natural conversation.
+// Initialize OpenRouter Client
+const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: OPENROUTER_API_KEY,
+  defaultHeaders: {
+    "HTTP-Referer": "http://localhost:3001",
+    "X-Title": "Financial Text-to-SQL Assistant",
+  },
+});
 
-Rules you must always follow:
-- If the user greeting you (e.g. 'hi', 'hello', 'hey', 'hii') or asking a general non-database question, set "sql": null and provide a friendly, helpful conversational response in "explanation".
-- Only ever generate a single SELECT statement when querying data. Never generate INSERT, UPDATE, DELETE, DROP, ALTER, EXEC, MERGE, or TRUNCATE.
-- Only use tables and columns that appear in the schema below. Never invent column or table names.
-- Never use SELECT * — always list explicit column names.
-- Always add "TOP ${MAX_ROWS}" to the SELECT (or fewer if the user asks for a specific smaller number).
-- Use SQL Server syntax (T-SQL), not MySQL/Postgres syntax.
-- If the question cannot be answered with the given schema, return {"sql": null, "explanation": "friendly explanation of what financial performance data is available"}.
+// ============================================================================
+// Authentication API Endpoints
+// ============================================================================
 
-Schema:
-${SCHEMA_DESCRIPTION}
-
-Respond with ONLY a JSON object in this exact shape, no prose and no markdown fences outside the JSON:
-{
-  "explanation": "friendly conversational response OR plain-English summary of what the query returns",
-  "sql": "the T-SQL SELECT statement, or null if greeting/general conversation/unanswerable"
-}`;
-
-function extractJson(rawText) {
-  const cleaned = rawText.replace(/```json/gi, "").replace(/```/g, "").trim();
+app.post("/api/auth/signup", validateBody(signupSchema), async (req, res, next) => {
   try {
-    return JSON.parse(cleaned);
-  } catch {
-    throw new Error("Model response was not valid JSON.");
-  }
-}
-
-async function generateNaturalLanguageAnswer(question, sql, columns, rows, defaultExplanation) {
-  if (!rows || rows.length === 0) {
-    return defaultExplanation || "No matching data records were found for your query.";
-  }
-
-  try {
-    const prompt = `You are an expert financial AI analyst. Analyze the following data returned from a query and answer the user's question directly with key analytical insights.
-
-User Question: "${question}"
-SQL Executed: ${sql}
-Columns: ${columns.join(", ")}
-Data Rows:
-${JSON.stringify(rows.slice(0, 15))}
-
-Provide a well-formatted analysis with:
-1. **Executive Summary**: Direct 1-2 sentence answer to the user's question.
-2. **Key Data Highlights**: 2-3 bullet points calling out specific top values, totals, averages, or significant patterns in the dataset.
-3. **Analyst Takeaway**: 1 brief actionable observation based on the figures.
-
-Use plain text formatting with bullet points and bold highlights. Keep it concise, professional, and focused purely on the financial data. Do NOT mention SQL syntax or table structure.`;
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.AI_MODEL || "openai/gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    return completion.choices[0]?.message?.content?.trim() || defaultExplanation;
+    const user = await registerUser(req.body);
+    const token = generateToken(user);
+    logger.info({ userEmail: user.email, role: user.role }, "User registered successfully.");
+    res.json({ success: true, token, user });
   } catch (err) {
-    logger.warn({ err: err.message }, "Secondary natural language generation failed; returning base explanation.");
-    return defaultExplanation;
+    if (err.message.includes("already exists")) {
+      return res.status(409).json({ success: false, error: err.message });
+    }
+    next(err);
   }
-}
+});
 
-// ---------------------------------------------------------------------------
-// Text-to-SQL Core Endpoint (Cached, Rate-limited, RBAC Enforced)
-// ---------------------------------------------------------------------------
+app.post("/api/auth/signin", authLimiter, validateBody(signinSchema), async (req, res, next) => {
+  try {
+    const user = await loginUser(req.body);
+    const token = generateToken(user);
+    logger.info({ userEmail: user.email, role: user.role }, "User signed in successfully.");
+    res.json({ success: true, token, user });
+  } catch (err) {
+    if (err.message.includes("Invalid email or password")) {
+      return res.status(401).json({ success: false, error: err.message });
+    }
+    next(err);
+  }
+});
 
-app.post("/api/ask", askLimiter, validateBody(askSchema), async (req, res, next) => {
-  const { question, conversationHistory } = req.body;
+// ============================================================================
+// Protected Chat Session Routes (Requires JWT Token)
+// ============================================================================
+
+app.get("/api/chats", authMiddleware, async (req, res, next) => {
+  try {
+    const userEmail = req.user.email;
+    const chats = await getAllChats(userEmail);
+    res.json({ success: true, chats });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/api/chats/:id", authMiddleware, async (req, res, next) => {
+  try {
+    const userEmail = req.user.email;
+    const chat = await getChatById(req.params.id, userEmail);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: "Chat thread not found." });
+    }
+    res.json({ success: true, chat });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post("/api/chats", authMiddleware, async (req, res, next) => {
+  try {
+    const userEmail = req.user.email;
+    const { title } = req.body;
+    const chat = await createChat(userEmail, title || "New Chat");
+    res.json({ success: true, chat });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put("/api/chats/:id", authMiddleware, async (req, res, next) => {
+  try {
+    const userEmail = req.user.email;
+    const chat = await updateChat(req.params.id, userEmail, req.body);
+    if (!chat) {
+      return res.status(404).json({ success: false, error: "Chat thread not found." });
+    }
+    res.json({ success: true, chat });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete("/api/chats/:id", authMiddleware, async (req, res, next) => {
+  try {
+    const userEmail = req.user.email;
+    const deleted = await deleteChat(req.params.id, userEmail);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: "Chat thread not found." });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ============================================================================
+// Main Text-to-SQL Query Generation Endpoint (Protected + Rate Limited)
+// ============================================================================
+
+app.post("/api/ask", authMiddleware, askLimiter, validateBody(askSchema), async (req, res, next) => {
   const startTime = Date.now();
-  const clientIp = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
-  const userEmail = req.user?.email || "anonymous";
+  const { question, chatId } = req.body;
+  const user = req.user;
 
   try {
-    // 0. Check LRU Cache
-    const cached = getCachedQuery(question);
-    if (cached && (!conversationHistory || conversationHistory.length === 0)) {
-      logger.info({ question }, "Serving query response from LRU cache.");
+    // 1. Check LRU Cache
+    const cachedResponse = getCachedQuery(question);
+    if (cachedResponse) {
       logAuditEntry({
-        userEmail,
-        ip: clientIp,
+        userEmail: user.email,
+        ip: req.ip,
+        queryType: "TEXT_TO_SQL_CACHE",
+        question,
+        sql: cachedResponse.sql,
+        executionTimeMs: Date.now() - startTime,
+        status: "SUCCESS",
+        rowCount: cachedResponse.data?.rows?.length || 0,
+      });
+
+      return res.json({
+        success: true,
+        sql: cachedResponse.sql,
+        data: cachedResponse.data,
+        explanation: cachedResponse.explanation + " (Retrieved from LRU Cache)",
+        cached: true,
+      });
+    }
+
+    // 2. Fetch Multi-Turn History
+    let conversationHistory = [];
+    if (chatId) {
+      const existingChat = await getChatById(chatId, user.email);
+      if (existingChat && Array.isArray(existingChat.messages)) {
+        conversationHistory = existingChat.messages.slice(-6).map((m) => ({
+          role: m.sender === "user" ? "user" : "assistant",
+          content: m.sender === "ai" && m.sql ? `Generated SQL: ${m.sql}\nResponse: ${m.text}` : m.text,
+        }));
+      }
+    }
+
+    // 3. RAG Domain Knowledge Context
+    const knowledgeDocs = retrieveRelevantKnowledge(question, 3);
+    const ragContextText = knowledgeDocs.map((d) => `[Doc: ${d.title}]\n${d.content}`).join("\n\n");
+
+    const promptMessages = [
+      {
+        role: "system",
+        content: `${SCHEMA_DESCRIPTION}
+
+Domain Knowledge & KPI Formulas:
+${ragContextText}
+
+Instructions:
+1. Respond with a valid JSON object matching this schema:
+   {
+     "sql": "SELECT TOP 200 ...",
+     "explanation": "Brief non-technical description of the results"
+   }
+2. ONLY output raw JSON. Do NOT wrap in Markdown code blocks.`,
+      },
+      ...conversationHistory,
+      {
+        role: "user",
+        content: `User Question: "${question}"`,
+      },
+    ];
+
+    let aiMessage = "";
+    try {
+      const response = await openai.chat.completions.create({
+        model: AI_MODEL,
+        messages: promptMessages,
+        temperature: 0.1,
+      });
+      aiMessage = response.choices[0]?.message?.content || "";
+    } catch (llmErr) {
+      logger.error({ err: llmErr.message }, "OpenRouter API Call Failed");
+      return res.status(502).json({
+        success: false,
+        error: "AI Model Provider Error. Unable to generate SQL at this time.",
+      });
+    }
+
+    let parsed;
+    try {
+      const cleaned = aiMessage.replace(/```json/gi, "").replace(/```/g, "").trim();
+      parsed = JSON.parse(cleaned);
+    } catch (err) {
+      logger.warn({ aiMessage }, "Failed to parse JSON response from LLM");
+      return res.status(422).json({
+        success: false,
+        error: "Invalid AI response structure. Please rephrase your financial question.",
+      });
+    }
+
+    const { sql: rawSql, explanation } = parsed;
+
+    // 4. Security Sandbox AST Validation
+    let validatedSql, tablesUsed;
+    try {
+      const validated = validateAndSanitizeSql(rawSql, {
+        allowedTables: SCHEMA_TABLES,
+        maxRows: 200,
+      });
+      validatedSql = validated.sql;
+      tablesUsed = validated.tablesUsed;
+    } catch (valErr) {
+      logAuditEntry({
+        userEmail: user.email,
+        ip: req.ip,
         queryType: "TEXT_TO_SQL",
         question,
-        sql: cached.sql,
+        sql: rawSql,
         executionTimeMs: Date.now() - startTime,
-        status: "SUCCESS",
-        rowCount: cached.rowCount,
-      });
-      return res.status(200).json({ ...cached, cached: true });
-    }
-
-    // 1. RAG Context & Conversation Memory Assembly
-    const ragDocs = retrieveRelevantKnowledge(question, 3);
-    const ragContextText = ragDocs.map((doc) => `[${doc.category}] ${doc.title}:\n${doc.content}`).join("\n\n");
-
-    const dynamicPrompt = `${SYSTEM_PROMPT}
-
-Retrieved Domain Knowledge & Schema Context (RAG):
-${ragContextText}`;
-
-    const messages = [{ role: "system", content: dynamicPrompt }];
-
-    // Incorporate multi-turn conversation memory
-    if (conversationHistory && Array.isArray(conversationHistory)) {
-      conversationHistory.slice(-4).forEach((turn) => {
-        messages.push({ role: turn.role, content: turn.content });
-      });
-    }
-    messages.push({ role: "user", content: question });
-
-    // 2. Ask AI Model
-    const completion = await openai.chat.completions.create({
-      model: process.env.AI_MODEL || "openai/gpt-4o-mini",
-      messages,
-      response_format: { type: "json_object" },
-    });
-
-    const rawText = completion.choices[0]?.message?.content || "";
-    const parsed = extractJson(rawText);
-
-    if (!parsed.sql) {
-      logAuditEntry({
-        userEmail,
-        ip: clientIp,
-        queryType: "CONVERSATIONAL",
-        question,
-        sql: null,
-        executionTimeMs: Date.now() - startTime,
-        status: "SUCCESS",
-        rowCount: 0,
+        status: "BLOCKED",
+        error: valErr.message,
       });
 
-      const responsePayload = {
-        success: true,
-        isConversational: true,
-        explanation: parsed.explanation,
-        aiAnswer: parsed.explanation,
-        sql: null,
-        columns: [],
-        rows: [],
-        rowCount: 0,
-        ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
-      };
-
-      setCachedQuery(question, responsePayload);
-      return res.status(200).json(responsePayload);
+      return res.status(400).json({
+        success: false,
+        error: valErr.message,
+      });
     }
 
-    // 3. Structural SQL Safety Gate
-    const { sql: validatedSql, tablesUsed } = validateAndSanitizeSql(parsed.sql, {
-      allowedTables: SCHEMA_TABLES,
-      maxRows: MAX_ROWS,
-    });
-
-    // 4. RBAC Table & Data Restriction Check
-    const authCheck = isAuthorizedForTable(req.user, tablesUsed);
+    // 5. RBAC Authorization & Where Injection
+    const authCheck = isAuthorizedForTable(user, tablesUsed);
     if (!authCheck.authorized) {
-      return res.status(403).json({ success: false, error: authCheck.reason });
+      logAuditEntry({
+        userEmail: user.email,
+        ip: req.ip,
+        queryType: "TEXT_TO_SQL",
+        question,
+        sql: validatedSql,
+        executionTimeMs: Date.now() - startTime,
+        status: "BLOCKED",
+        error: authCheck.reason,
+      });
+
+      return res.status(403).json({
+        success: false,
+        error: `Access Denied: ${authCheck.reason}`,
+      });
     }
 
-    const safeSql = applyRbacConstraints(validatedSql, req.user);
+    const safeSql = applyRbacConstraints(validatedSql, user);
 
-    // 5. Query Execution against SQL Server / Smart Mock Fallback
+    // 6. Execute Query against MSSQL or Mock Evaluator
     let columns = [];
     let rows = [];
-    let dbWarning = null;
+    let source = "SQL_SERVER";
 
     try {
       const pool = await getPool();
@@ -233,23 +338,22 @@ ${ragContextText}`;
       columns = result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [];
       rows = result.recordset.map((row) => Object.values(row).map(String));
     } catch (dbErr) {
-      logger.warn({ dbErr: dbErr.message }, "SQL Server unavailable; using smart mock evaluator.");
-      dbWarning = "SQL Server (localhost:1433) is currently unreachable. Displaying sample preview data below.";
+      logger.warn({ err: dbErr.message }, "SQL Server connection unavailable. Executing query against Mock Data Engine.");
+      source = "MOCK_EVALUATOR";
       const mockResult = getMockQueryData(tablesUsed, safeSql);
       columns = mockResult.columns;
       rows = mockResult.rows;
     }
 
-    // 6. Natural Language Answer Generation
-    let aiAnswer = parsed.explanation;
-    if (columns.length > 0 && rows.length > 0) {
-      aiAnswer = await generateNaturalLanguageAnswer(question, safeSql, columns, rows, parsed.explanation);
-    }
+    const dataPayload = { columns, rows, source };
 
-    // 7. Audit Log Entry
+    // 7. Store in LRU Cache
+    setCachedQuery(question, { sql: safeSql, data: dataPayload, explanation });
+
+    // 8. Log Structured Audit Entry
     logAuditEntry({
-      userEmail,
-      ip: clientIp,
+      userEmail: user.email,
+      ip: req.ip,
       queryType: "TEXT_TO_SQL",
       question,
       sql: safeSql,
@@ -258,119 +362,96 @@ ${ragContextText}`;
       rowCount: rows.length,
     });
 
-    const responsePayload = {
+    res.json({
       success: true,
-      explanation: parsed.explanation,
-      aiAnswer,
       sql: safeSql,
-      tablesUsed,
-      columns,
-      rows,
-      rowCount: rows.length,
-      dbWarning,
-      ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
-    };
-
-    setCachedQuery(question, responsePayload);
-    return res.status(200).json(responsePayload);
-  } catch (error) {
-    logAuditEntry({
-      userEmail,
-      ip: clientIp,
-      queryType: "TEXT_TO_SQL",
-      question,
-      sql: null,
-      executionTimeMs: Date.now() - startTime,
-      status: "FAILURE",
-      rowCount: 0,
-      error: error.message,
+      data: dataPayload,
+      explanation,
     });
-    next(error);
+  } catch (err) {
+    next(err);
   }
 });
 
-// ---------------------------------------------------------------------------
-// Execute Custom SQL Query (JWT Protected, RBAC Checked)
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Direct SQL Execution Sandbox Endpoint (Protected)
+// ============================================================================
 
 app.post("/api/execute-sql", authMiddleware, validateBody(executeSqlSchema), async (req, res, next) => {
-  const { sql: customSql } = req.body;
   const startTime = Date.now();
-  const clientIp = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
-  const userEmail = req.user?.email || "anonymous";
+  const { sql } = req.body;
+  const user = req.user;
 
   try {
-    const { sql: validatedSql, tablesUsed } = validateAndSanitizeSql(customSql, {
+    const { sql: validatedSql, tablesUsed } = validateAndSanitizeSql(sql, {
       allowedTables: SCHEMA_TABLES,
-      maxRows: MAX_ROWS,
+      maxRows: 200,
     });
 
-    const authCheck = isAuthorizedForTable(req.user, tablesUsed);
+    const authCheck = isAuthorizedForTable(user, tablesUsed);
     if (!authCheck.authorized) {
-      return res.status(403).json({ success: false, error: authCheck.reason });
+      return res.status(403).json({ success: false, error: `Access Denied: ${authCheck.reason}` });
     }
 
-    const safeSql = applyRbacConstraints(validatedSql, req.user);
+    const safeSql = applyRbacConstraints(validatedSql, user);
 
-    const pool = await getPool();
-    const request = pool.request();
-    request.timeout = 8000;
-    const result = await request.query(safeSql);
+    let columns = [];
+    let rows = [];
+    let source = "SQL_SERVER";
 
-    const columns = result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [];
-    const rows = result.recordset.map((row) => Object.values(row).map(String));
+    try {
+      const pool = await getPool();
+      const request = pool.request();
+      request.timeout = 8000;
+      const result = await request.query(safeSql);
+
+      columns = result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [];
+      rows = result.recordset.map((row) => Object.values(row).map(String));
+    } catch (dbErr) {
+      source = "MOCK_EVALUATOR";
+      const mockResult = getMockQueryData(tablesUsed, safeSql);
+      columns = mockResult.columns;
+      rows = mockResult.rows;
+    }
 
     logAuditEntry({
-      userEmail,
-      ip: clientIp,
-      queryType: "DIRECT_EXECUTE",
-      question: "User Custom SQL Execution",
+      userEmail: user.email,
+      ip: req.ip,
+      queryType: "DIRECT_EXECUTE_SQL",
+      question: "Direct Execution Sandbox",
       sql: safeSql,
       executionTimeMs: Date.now() - startTime,
       status: "SUCCESS",
-      rowCount: result.recordset.length,
+      rowCount: rows.length,
     });
 
-    return res.status(200).json({
+    res.json({
       success: true,
-      explanation: "Executed custom modified query",
       sql: safeSql,
-      tablesUsed,
-      columns,
-      rows,
-      rowCount: result.recordset.length,
+      data: { columns, rows, source },
     });
-  } catch (error) {
-    logAuditEntry({
-      userEmail,
-      ip: clientIp,
-      queryType: "DIRECT_EXECUTE",
-      question: "User Custom SQL Execution",
-      sql: customSql,
-      executionTimeMs: Date.now() - startTime,
-      status: "FAILURE",
-      rowCount: 0,
-      error: error.message,
-    });
-    next(error);
+  } catch (err) {
+    if (err instanceof SqlValidationError) {
+      return res.status(400).json({ success: false, error: err.message });
+    }
+    next(err);
   }
 });
 
-// ---------------------------------------------------------------------------
-// Feedback Endpoint
-// ---------------------------------------------------------------------------
+// ============================================================================
+// User Feedback & SQL Correction Endpoint (Protected)
+// ============================================================================
 
 app.post("/api/feedback", authMiddleware, async (req, res, next) => {
   try {
-    const { chatId, question, sql, rating, comment, suggestedSql } = req.body;
+    const { question, generatedSql, rating, correctedSql, comment } = req.body;
     const feedback = await recordFeedback({
       userEmail: req.user.email,
-      chatId,
       question,
-      sql,
+      generatedSql,
       rating,
+      correctedSql,
       comment,
-      suggestedSql,
     });
     res.json({ success: true, feedback });
   } catch (err) {
@@ -378,115 +459,8 @@ app.post("/api/feedback", authMiddleware, async (req, res, next) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Auth Routes (JWT Token-Based, Zod Validated, Rate Limited)
-// ---------------------------------------------------------------------------
-
-app.post("/api/auth/signup", rateLimitAuth, validateBody(signupSchema), async (req, res, next) => {
-  try {
-    const user = await registerUser(req.body);
-    const token = generateToken(user);
-    res.json({ success: true, user, token });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.post("/api/auth/signin", rateLimitAuth, validateBody(signinSchema), async (req, res, next) => {
-  try {
-    const { email, password } = req.body;
-    const user = await loginUser(email, password);
-    const token = generateToken(user);
-    res.json({ success: true, user, token });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.post("/api/auth/google", async (req, res, next) => {
-  try {
-    const user = await findOrCreateUser(req.body);
-    const token = generateToken(user);
-    res.json({ success: true, user, token });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.get("/api/auth/profile", authMiddleware, async (req, res, next) => {
-  try {
-    const user = await getUserByEmail(req.user.email);
-    if (!user) return res.status(404).json({ success: false, error: "User not found." });
-    res.json({ success: true, user });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Chat Persistence Routes (JWT Protected)
-// ---------------------------------------------------------------------------
-
-function getUserEmail(req) {
-  return req.user?.email || "guest@financial-assistant.com";
-}
-
-app.get("/api/chats", authMiddleware, async (req, res, next) => {
-  try {
-    const email = getUserEmail(req);
-    const chats = await getAllChats(email);
-    res.json({ success: true, chats });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.get("/api/chats/:id", authMiddleware, async (req, res, next) => {
-  try {
-    const email = getUserEmail(req);
-    const chat = await getChatById(req.params.id, email);
-    if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
-    res.json({ success: true, chat });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.post("/api/chats", authMiddleware, async (req, res, next) => {
-  try {
-    const email = getUserEmail(req);
-    const chat = await createChat(email, req.body);
-    res.json({ success: true, chat });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.put("/api/chats/:id", authMiddleware, async (req, res, next) => {
-  try {
-    const email = getUserEmail(req);
-    const chat = await updateChat(req.params.id, email, req.body);
-    if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
-    res.json({ success: true, chat });
-  } catch (err) {
-    next(err);
-  }
-});
-
-app.delete("/api/chats/:id", authMiddleware, async (req, res, next) => {
-  try {
-    const email = getUserEmail(req);
-    const deleted = await deleteChat(req.params.id, email);
-    if (!deleted) return res.status(404).json({ success: false, error: "Chat not found." });
-    res.json({ success: true });
-  } catch (err) {
-    next(err);
-  }
-});
-
 // ============================================================================
 // Remote MCP (Model Context Protocol) SSE Endpoints
-// Allows remote AI clients (Claude Desktop, Cursor, AI agents) to connect over HTTP/HTTPS
 // ============================================================================
 
 app.get("/mcp/sse", handleSseConnect);
@@ -495,13 +469,7 @@ app.post("/mcp/message", handleSseMessage);
 // Centralized Global Express Error Handler Middleware
 app.use(errorHandler);
 
-// ---------------------------------------------------------------------------
-// Server Initialization
-// ---------------------------------------------------------------------------
-
-const PORT = process.env.PORT || 3001;
-const MONGO_URI = process.env.MONGO_URI;
-
+// Boot Server
 mongoose
   .connect(MONGO_URI)
   .then(async () => {

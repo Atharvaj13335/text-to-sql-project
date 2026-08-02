@@ -11,17 +11,23 @@ import {
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
-import { validateAndSanitizeSql, SqlValidationError } from "./validateSql.js";
-import { retrieveRelevantKnowledge, retrieveRelevantKnowledgeAsync, getAllKnowledgeDocs, getKnowledgeDocById, addKnowledgeDoc, deleteKnowledgeDoc } from "./knowledgeStore.js";
-import { getPool } from "./db.js";
-import { getMockQueryData } from "./mockData.js";
-import { applyRbacConstraints, isAuthorizedForTable } from "./rbac.js";
-import { logAuditEntry } from "./auditLogger.js";
+import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "../config/schema.js";
+import { validateAndSanitizeSql } from "../security/validateSql.js";
+import {
+  retrieveRelevantKnowledge,
+  retrieveRelevantKnowledgeAsync,
+  getAllKnowledgeDocs,
+  getKnowledgeDocById,
+  addKnowledgeDoc,
+  deleteKnowledgeDoc,
+} from "../services/knowledgeStore.js";
+import { getPool } from "../config/db.js";
+import { getMockQueryData } from "../services/mockData.js";
+import { applyRbacConstraints, isAuthorizedForTable } from "../security/rbac.js";
+import { logAuditEntry } from "../security/auditLogger.js";
 
 const MAX_ROWS = 200;
 
-// Initialize Model Context Protocol (MCP) Server
 const server = new Server(
   {
     name: "financial-text-to-sql-mcp",
@@ -35,10 +41,6 @@ const server = new Server(
     },
   }
 );
-
-// ---------------------------------------------------------------------------
-// 1. MCP Resources
-// ---------------------------------------------------------------------------
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   const docs = await getAllKnowledgeDocs();
@@ -96,7 +98,6 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     };
   }
 
-  // Per-document resource: financial://knowledge/{id}
   const docMatch = uri.match(/^financial:\/\/knowledge\/(.+)$/);
   if (docMatch) {
     const docId = docMatch[1];
@@ -115,10 +116,6 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
   throw new Error(`Resource not found: ${uri}`);
 });
-
-// ---------------------------------------------------------------------------
-// 2. MCP Tools
-// ---------------------------------------------------------------------------
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -150,7 +147,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "search_domain_knowledge",
-        description: "TF-IDF search over MongoDB-persisted RAG knowledge base of investment definitions, schema conventions, and SQL patterns.",
+        description: "TF-IDF search over RAG knowledge base of investment definitions, schema conventions, and SQL patterns.",
         inputSchema: {
           type: "object",
           properties: {
@@ -167,14 +164,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "add_knowledge_document",
-        description: "Add a new domain knowledge document to the financial RAG knowledge base. It will be immediately searchable.",
+        description: "Add a new domain knowledge document to the financial RAG knowledge base.",
         inputSchema: {
           type: "object",
           properties: {
             id: { type: "string", description: "Unique document ID (snake_case, e.g. 'esg_strategy_guide')." },
-            category: { type: "string", description: "Category (e.g. 'SQL Best Practices', 'Domain Calculations & Rules')." },
+            category: { type: "string", description: "Category." },
             title: { type: "string", description: "Short human-readable title." },
-            keywords: { type: "array", items: { type: "string" }, description: "List of keyword strings for scoring." },
+            keywords: { type: "array", items: { type: "string" }, description: "Keywords list." },
             content: { type: "string", description: "Full document content text." },
           },
           required: ["id", "category", "title", "keywords", "content"],
@@ -182,7 +179,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "delete_knowledge_document",
-        description: "Remove a knowledge document from the RAG knowledge base by its ID.",
+        description: "Remove a knowledge document from the RAG knowledge base by ID.",
         inputSchema: {
           type: "object",
           properties: {
@@ -204,23 +201,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         allowedTables: SCHEMA_TABLES,
         maxRows: MAX_ROWS,
       });
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ valid: true, safeSql, tablesUsed }, null, 2),
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: JSON.stringify({ valid: true, safeSql, tablesUsed }, null, 2) }] };
     } catch (err) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ valid: false, error: err.message }, null, 2),
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: JSON.stringify({ valid: false, error: err.message }, null, 2) }] };
     }
   }
 
@@ -240,37 +223,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === "list_knowledge_documents") {
     const docs = await getAllKnowledgeDocs();
     return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(docs.map(({ id, category, title, keywords }) => ({ id, category, title, keywords })), null, 2),
-        },
-      ],
+      content: [{ type: "text", text: JSON.stringify(docs.map(({ id, category, title, keywords }) => ({ id, category, title, keywords })), null, 2) }],
     };
   }
 
   if (name === "add_knowledge_document") {
     const newDoc = await addKnowledgeDoc(args);
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ success: true, document: newDoc }, null, 2),
-        },
-      ],
-    };
+    return { content: [{ type: "text", text: JSON.stringify({ success: true, document: newDoc }, null, 2) }] };
   }
 
   if (name === "delete_knowledge_document") {
     const deleted = await deleteKnowledgeDoc(args.id);
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ success: deleted, id: args.id }, null, 2),
-        },
-      ],
-    };
+    return { content: [{ type: "text", text: JSON.stringify({ success: deleted, id: args.id }, null, 2) }] };
   }
 
   if (name === "execute_financial_sql") {
@@ -328,19 +292,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              {
-                success: true,
-                source,
-                sql: safeSql,
-                tablesUsed,
-                columns,
-                rows,
-                rowCount: rows.length,
-              },
-              null,
-              2
-            ),
+            text: JSON.stringify({ success: true, source, sql: safeSql, tablesUsed, columns, rows, rowCount: rows.length }, null, 2),
           },
         ],
       };
@@ -357,23 +309,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         error: err.message,
       });
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ success: false, error: err.message }, null, 2),
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: JSON.stringify({ success: false, error: err.message }, null, 2) }] };
     }
   }
 
   throw new Error(`Tool not found: ${name}`);
 });
-
-// ---------------------------------------------------------------------------
-// 3. MCP Prompts
-// ---------------------------------------------------------------------------
 
 server.setRequestHandler(ListPromptsRequestSchema, async () => {
   return {
@@ -388,27 +329,18 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => {
 
 server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   const { name } = request.params;
-
   if (name === "financial_analyst_prompt") {
     return {
       messages: [
         {
           role: "user",
-          content: {
-            type: "text",
-            text: `You are an expert financial AI analyst. Only generate SELECT statements using T-SQL syntax. Schema:\n${SCHEMA_DESCRIPTION}`,
-          },
+          content: { type: "text", text: `You are an expert financial AI analyst. Only generate SELECT statements using T-SQL syntax. Schema:\n${SCHEMA_DESCRIPTION}` },
         },
       ],
     };
   }
-
   throw new Error(`Prompt not found: ${name}`);
 });
-
-// ---------------------------------------------------------------------------
-// 4. Server Transport Startup
-// ---------------------------------------------------------------------------
 
 async function main() {
   const transport = new StdioServerTransport();

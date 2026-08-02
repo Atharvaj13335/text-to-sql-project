@@ -9,25 +9,22 @@ import {
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "./schema.js";
-import { validateAndSanitizeSql } from "./validateSql.js";
+import { SCHEMA_DESCRIPTION, SCHEMA_TABLES } from "../config/schema.js";
+import { validateAndSanitizeSql } from "../security/validateSql.js";
 import {
   retrieveRelevantKnowledgeAsync,
   getAllKnowledgeDocs,
   getKnowledgeDocById,
   addKnowledgeDoc,
   deleteKnowledgeDoc,
-} from "./knowledgeStore.js";
-import { getPool } from "./db.js";
-import { getMockQueryData } from "./mockData.js";
-import { applyRbacConstraints, isAuthorizedForTable } from "./rbac.js";
-import { logAuditEntry } from "./auditLogger.js";
+} from "../services/knowledgeStore.js";
+import { getPool } from "../config/db.js";
+import { getMockQueryData } from "../services/mockData.js";
+import { applyRbacConstraints, isAuthorizedForTable } from "../security/rbac.js";
+import { logAuditEntry } from "../security/auditLogger.js";
 
 const MAX_ROWS = 200;
 
-/**
- * Creates and configures a new MCP Server instance.
- */
 function createMcpServer() {
   const server = new Server(
     {
@@ -43,7 +40,6 @@ function createMcpServer() {
     }
   );
 
-  // 1. Resources
   server.setRequestHandler(ListResourcesRequestSchema, async () => {
     const docs = await getAllKnowledgeDocs();
     const docResources = docs.map((doc) => ({
@@ -119,7 +115,6 @@ function createMcpServer() {
     throw new Error(`Resource not found: ${uri}`);
   });
 
-  // 2. Tools
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return {
       tools: [
@@ -319,7 +314,6 @@ function createMcpServer() {
     throw new Error(`Tool not found: ${name}`);
   });
 
-  // 3. Prompts
   server.setRequestHandler(ListPromptsRequestSchema, async () => {
     return {
       prompts: [
@@ -349,12 +343,8 @@ function createMcpServer() {
   return server;
 }
 
-// Map storing active SSE transports by sessionId
 const activeTransports = new Map();
 
-/**
- * Express middleware handler for GET /mcp/sse (Establishes SSE stream connection)
- */
 export async function handleSseConnect(req, res) {
   const mcpServer = createMcpServer();
   const transport = new SSEServerTransport("/mcp/message", res);
@@ -368,9 +358,6 @@ export async function handleSseConnect(req, res) {
   await mcpServer.connect(transport);
 }
 
-/**
- * Express middleware handler for POST /mcp/message (Receives incoming MCP messages for session)
- */
 export async function handleSseMessage(req, res) {
   const sessionId = req.query.sessionId;
   const session = activeTransports.get(sessionId);

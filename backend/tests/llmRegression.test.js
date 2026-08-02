@@ -1,60 +1,37 @@
-import { validateAndSanitizeSql } from "../validateSql.js";
-import { SCHEMA_TABLES } from "../schema.js";
+import test, { describe } from "node:test";
+import assert from "node:assert/strict";
+import { validateAndSanitizeSql } from "../src/security/validateSql.js";
 
-const REGRESSION_TEST_CASES = [
+const allowedTables = ["CompositePerformance", "Account", "Benchmark"];
+
+const REGRESSION_TEST_QUERIES = [
   {
-    name: "Account listing",
-    question: "Show top 5 accounts by market value",
-    testSql: "SELECT TOP 5 AccountName, MarketValue FROM Account ORDER BY MarketValue DESC",
-    expectedKeywords: ["TOP", "AccountName", "MarketValue", "ORDER BY", "DESC"],
-    expectedTable: "Account",
+    category: "Composite Performance Queries",
+    input: "SELECT CompositeName, YTDReturn FROM CompositePerformance ORDER BY YTDReturn DESC",
+    expectedTables: ["CompositePerformance"],
   },
   {
-    name: "Composite YTD return",
-    question: "List all composites with YTD return greater than 10%",
-    testSql: "SELECT TOP 200 CompositeName, YTDReturn FROM CompositePerformance WHERE YTDReturn > 10",
-    expectedKeywords: ["CompositeName", "YTDReturn", "WHERE"],
-    expectedTable: "CompositePerformance",
+    category: "Account Asset Values",
+    input: "SELECT AccountName, MarketValue FROM Account WHERE MarketValue > 10000000",
+    expectedTables: ["Account"],
   },
   {
-    name: "Benchmark performance",
-    question: "Show all benchmarks and their return",
-    testSql: "SELECT TOP 200 BenchmarkName, BenchmarkReturn FROM Benchmark",
-    expectedKeywords: ["BenchmarkName", "BenchmarkReturn"],
-    expectedTable: "Benchmark",
+    category: "Benchmark Comparisons",
+    input: "SELECT c.CompositeName, c.YTDReturn, b.BenchmarkName, b.BenchmarkReturn FROM CompositePerformance c JOIN Benchmark b ON c.BenchmarkID = b.BenchmarkID",
+    expectedTables: ["CompositePerformance", "Benchmark"],
   },
 ];
 
-console.log("================================================");
-console.log("🧪 RUNNING LLM & VALIDATOR REGRESSION TEST SUITE");
-console.log("================================ failure =================\n");
+describe("LLM Prompt & AST Safety Regression Suite", () => {
+  REGRESSION_TEST_QUERIES.forEach(({ category, input, expectedTables }) => {
+    test(`[${category}] validates safety and table dependencies`, () => {
+      const result = validateAndSanitizeSql(input, { allowedTables, maxRows: 200 });
 
-let passed = 0;
-
-for (const testCase of REGRESSION_TEST_CASES) {
-  console.log(`Testing: "${testCase.question}"`);
-  
-  try {
-    const { sql, tablesUsed } = validateAndSanitizeSql(testCase.testSql, {
-      allowedTables: SCHEMA_TABLES,
-      maxRows: 200,
+      assert.ok(result.sql);
+      assert.match(result.sql, /SELECT TOP 200/i);
+      expectedTables.forEach((table) => {
+        assert.ok(result.tablesUsed.includes(table));
+      });
     });
-    
-    const hasTable = tablesUsed.includes(testCase.expectedTable);
-    const hasKeywords = testCase.expectedKeywords.every((kw) => sql.toUpperCase().includes(kw.toUpperCase()));
-
-    if (hasTable && hasKeywords) {
-      console.log(`   Result: PASSED ✅ (Table: ${tablesUsed.join(", ")})`);
-      passed++;
-    } else {
-      console.log(`   Result: FAILED ❌ (Keywords missing)`);
-    }
-  } catch (err) {
-    console.log(`   Result: FAILED ❌ (${err.message})`);
-  }
-}
-
-console.log(`\nRegression Suite Completed: ${passed}/${REGRESSION_TEST_CASES.length} Passed.`);
-if (passed !== REGRESSION_TEST_CASES.length) {
-  process.exit(1);
-}
+  });
+});

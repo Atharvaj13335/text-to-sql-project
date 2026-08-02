@@ -1,12 +1,4 @@
-// ============================================================================
-// RAG Knowledge Store - MongoDB-backed, TF-IDF Scored Retrieval
-// ============================================================================
-
 import mongoose from "mongoose";
-
-// ---------------------------------------------------------------------------
-// 1. MongoDB Schema for persisted knowledge documents
-// ---------------------------------------------------------------------------
 
 const knowledgeDocSchema = new mongoose.Schema(
   {
@@ -15,17 +7,12 @@ const knowledgeDocSchema = new mongoose.Schema(
     title: { type: String, required: true },
     keywords: [{ type: String }],
     content: { type: String, required: true },
-    // Derived at seed/insert time for fast term lookups
     termFrequencies: { type: Map, of: Number, default: {} },
   },
   { timestamps: true }
 );
 
 const KnowledgeDoc = mongoose.models.KnowledgeDoc || mongoose.model("KnowledgeDoc", knowledgeDocSchema);
-
-// ---------------------------------------------------------------------------
-// 2. Static seed documents (same as original, these seed MongoDB on first run)
-// ---------------------------------------------------------------------------
 
 const SEED_DOCUMENTS = [
   {
@@ -127,10 +114,6 @@ Columns:
   },
 ];
 
-// ---------------------------------------------------------------------------
-// 3. TF-IDF Utilities
-// ---------------------------------------------------------------------------
-
 function tokenize(text) {
   return text
     .toLowerCase()
@@ -145,7 +128,6 @@ function computeTermFrequencies(doc) {
   tokens.forEach((t) => {
     tf[t] = (tf[t] || 0) + 1;
   });
-  // Normalize by document length
   const total = tokens.length || 1;
   Object.keys(tf).forEach((k) => {
     tf[k] = tf[k] / total;
@@ -161,8 +143,6 @@ function tfidfScore(queryTokens, doc, idfMap) {
     const termTf = tf[term] || 0;
     const idf = idfMap[term] || 0;
     score += termTf * idf;
-
-    // Bonus for keyword exact match
     if (doc.keywords && doc.keywords.includes(term)) score += 0.5;
   });
 
@@ -182,10 +162,6 @@ function computeIdf(docs, queryTokens) {
   return idf;
 }
 
-// ---------------------------------------------------------------------------
-// 4. Seeding — insert seed docs into MongoDB if collection is empty
-// ---------------------------------------------------------------------------
-
 let _inMemoryCache = null;
 
 export async function seedKnowledgeBase() {
@@ -202,22 +178,16 @@ export async function seedKnowledgeBase() {
       console.log(`[RAG] Seeded ${docsWithTf.length} knowledge documents to MongoDB.`);
     }
 
-    // Warm in-memory cache
     _inMemoryCache = await KnowledgeDoc.find({}).lean();
     console.log(`[RAG] Loaded ${_inMemoryCache.length} knowledge documents into cache.`);
   } catch (err) {
     console.warn("[RAG] Failed to seed/warm knowledge base from MongoDB:", err.message);
-    // Fall back to in-memory seed documents so the app still works
     _inMemoryCache = SEED_DOCUMENTS.map((doc) => ({
       ...doc,
       termFrequencies: computeTermFrequencies(doc),
     }));
   }
 }
-
-// ---------------------------------------------------------------------------
-// 5. Core retrieval — TF-IDF scored
-// ---------------------------------------------------------------------------
 
 export async function retrieveRelevantKnowledgeAsync(query, topK = 3) {
   const docs = await getDocsFromCache();
@@ -243,7 +213,6 @@ export async function retrieveRelevantKnowledgeAsync(query, topK = 3) {
   return (relevant.length > 0 ? relevant : scored).slice(0, topK);
 }
 
-// Sync version for backwards-compatibility with server.js and mcpServer.js
 export function retrieveRelevantKnowledge(query, topK = 3) {
   const docs = _inMemoryCache || SEED_DOCUMENTS.map((doc) => ({
     ...doc,
@@ -270,10 +239,6 @@ export function retrieveRelevantKnowledge(query, topK = 3) {
   const relevant = scored.filter((d) => d.score > 0);
   return (relevant.length > 0 ? relevant : scored).slice(0, topK);
 }
-
-// ---------------------------------------------------------------------------
-// 6. CRUD operations used by MCP tools and admin API
-// ---------------------------------------------------------------------------
 
 async function getDocsFromCache() {
   if (_inMemoryCache) return _inMemoryCache;
@@ -302,7 +267,6 @@ export async function addKnowledgeDoc({ id, category, title, keywords, content }
   const tf = computeTermFrequencies({ title, content, keywords });
   const newDoc = new KnowledgeDoc({ id, category, title, keywords, content, termFrequencies: tf });
   await newDoc.save();
-  // Invalidate cache
   _inMemoryCache = null;
   return { id, category, title, keywords, content };
 }
