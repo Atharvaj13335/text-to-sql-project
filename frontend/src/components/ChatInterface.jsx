@@ -20,11 +20,13 @@ import ParticleField from "./ParticleField.jsx";
 // Calls the Node backend's /api/ask route. In dev, vite.config.js proxies
 // /api to http://localhost:3001.
 // ---------------------------------------------------------------------------
-async function askBackend(question) {
+async function askBackend(question, token) {
   try {
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
     const res = await fetch("/api/ask", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ question }),
     });
 
@@ -135,7 +137,7 @@ async function executeSqlBackend(sql) {
   return data; // { success: true, explanation, sql, columns, rows, rowCount }
 }
 
-function SqlDisclosure({ sql, onSaveSql }) {
+function SqlDisclosure({ sql, onSaveSql, token }) {
   const [open, setOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editedSql, setEditedSql] = useState(sql);
@@ -151,7 +153,7 @@ function SqlDisclosure({ sql, onSaveSql }) {
     setRunning(true);
     setExecError("");
     try {
-      const result = await executeSqlBackend(editedSql);
+      const result = await executeSqlBackend(editedSql, token);
       if (onSaveSql) {
         onSaveSql(result);
       }
@@ -421,7 +423,7 @@ function QuickQueriesModal({ isOpen, onClose, onSelectQuery }) {
   );
 }
 
-function Message({ role, content, onSaveSql }) {
+function Message({ role, content, onSaveSql, token }) {
   if (role === "user") {
     return (
       <div className="flex justify-end animate-slide-up-pop">
@@ -481,7 +483,7 @@ function Message({ role, content, onSaveSql }) {
             )}
 
             {!content.isConversational && content.columns?.length > 0 && <ResultView columns={content.columns} rows={content.rows} />}
-            {!content.isConversational && content.sql && <SqlDisclosure sql={content.sql} onSaveSql={onSaveSql} />}
+            {!content.isConversational && content.sql && <SqlDisclosure sql={content.sql} onSaveSql={onSaveSql} token={token} />}
           </>
         )}
       </div>
@@ -489,12 +491,13 @@ function Message({ role, content, onSaveSql }) {
   );
 }
 
-export default function ChatInterface({ activeChat, onChatUpdate, onEnsureActiveChat, sidebarOpen, onToggleSidebar }) {
+export default function ChatInterface({ activeChat, onChatUpdate, onEnsureActiveChat, sidebarOpen, onToggleSidebar, user }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const bottomRef = useRef(null);
 
+  const token = user?.token;
   const messages = activeChat ? activeChat.messages : [];
 
   useEffect(() => {
@@ -540,7 +543,7 @@ export default function ChatInterface({ activeChat, onChatUpdate, onEnsureActive
     setLoading(true);
 
     try {
-      const result = await askBackend(question);
+      const result = await askBackend(question, token);
       onChatUpdate({ messages: [...updatedMessages, { role: "assistant", content: result }] });
     } catch (err) {
       onChatUpdate({ messages: [...updatedMessages, { role: "assistant", content: { error: err.message } }] });
@@ -617,6 +620,7 @@ export default function ChatInterface({ activeChat, onChatUpdate, onEnsureActive
                 role={m.role}
                 content={m.content}
                 onSaveSql={(newResult) => handleUpdateMessage(i, newResult)}
+                token={token}
               />
             ))
           )}

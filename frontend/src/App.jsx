@@ -356,6 +356,7 @@ export default function App() {
               onEnsureActiveChat={handleNewChat}
               sidebarOpen={sidebarOpen}
               onToggleSidebar={() => setSidebarOpen((s) => !s)}
+              user={user}
             />
           </div>
         </>
