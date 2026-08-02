@@ -370,10 +370,30 @@ function QuickQueriesModal({ isOpen, onClose, onSelectQuery }) {
   if (!isOpen) return null;
 
   const sampleQueries = [
-    { label: "Top Composites by YTD Return", query: "Show top 5 composites by YTD return" },
-    { label: "Accounts > $10M Market Value", query: "List all accounts with market value greater than 10 million" },
-    { label: "Composite vs Benchmark Return", query: "Compare composite YTD returns against benchmark returns" },
-    { label: "AUM & Account Count by Composite", query: "Show total market value and account count by composite" },
+    {
+      label: "Composites Outperforming Benchmarks",
+      query: "Which composites have a YTD return higher than their assigned benchmark return?",
+    },
+    {
+      label: "Top Account by AUM per Composite",
+      query: "For each composite, show the account with the highest market value",
+    },
+    {
+      label: "3-Year Trailing vs Benchmark Spread",
+      query: "Show the difference between 3-year composite return and benchmark return, ranked worst to best",
+    },
+    {
+      label: "Composite Total AUM",
+      query: "Show total AUM, number of accounts, and average account market value for each composite",
+    },
+    {
+      label: "Underperforming vs Benchmark",
+      query: "List all composites where YTD return is below the benchmark return, sorted by underperformance gap",
+    },
+    {
+      label: "Portfolio Inception Date Analysis",
+      query: "Show accounts with the oldest inception dates and their current market value",
+    },
   ];
 
   return (
