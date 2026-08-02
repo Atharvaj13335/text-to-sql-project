@@ -67,6 +67,51 @@ const askLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Helper function to synthesize direct, data-backed AI answers from SQL query results
+function generateDataInsight(question, columns, rows, fallbackExplanation) {
+  if (!rows || rows.length === 0) {
+    return "No matching financial records were found for your query.";
+  }
+
+  const nameIdx = columns.findIndex((c) => /name|composite|account|benchmark/i.test(c));
+  const valIdx = columns.findIndex((c) => /return|marketvalue|value|aum|count/i.test(c));
+
+  if (nameIdx !== -1 && valIdx !== -1) {
+    const topItem = rows[0];
+    const topName = topItem[nameIdx];
+    const topVal = topItem[valIdx];
+
+    const isReturn = /return/i.test(columns[valIdx]);
+    const isCurrency = /marketvalue|value|aum/i.test(columns[valIdx]);
+    const formattedVal = isReturn
+      ? `${topVal}%`
+      : isCurrency
+      ? `$${Number(topVal).toLocaleString()}`
+      : topVal;
+
+    if (rows.length === 1) {
+      return `Based on the latest financial data, **${topName}** stands at **${formattedVal}**.`;
+    }
+
+    const secondItem = rows[1];
+    const secondName = secondItem[nameIdx];
+    const secondVal = secondItem[valIdx];
+    const formattedSecond = isReturn
+      ? `${secondVal}%`
+      : isCurrency
+      ? `$${Number(secondVal).toLocaleString()}`
+      : secondVal;
+
+    return `Retrieved ${rows.length} records. **${topName}** leads with **${formattedVal}**, followed by **${secondName}** at **${formattedSecond}**.`;
+  }
+
+  if (rows.length > 0 && columns.length > 0) {
+    return `Retrieved ${rows.length} records matching "${question}". Key fields: ${columns.slice(0, 3).join(", ")}.`;
+  }
+
+  return fallbackExplanation || `Retrieved ${rows.length} financial records.`;
+}
+
 // Initialize OpenRouter Client
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
@@ -347,10 +392,13 @@ Instructions:
 
     const dataPayload = { columns, rows, source };
 
-    // 7. Store in LRU Cache
-    setCachedQuery(question, { sql: safeSql, data: dataPayload, explanation });
+    // 7. Synthesize Direct Data Insight Answer from Query Results
+    const aiAnswer = generateDataInsight(question, columns, rows, explanation);
 
-    // 8. Log Structured Audit Entry
+    // 8. Store in LRU Cache
+    setCachedQuery(question, { sql: safeSql, data: dataPayload, explanation, aiAnswer });
+
+    // 9. Log Structured Audit Entry
     logAuditEntry({
       userEmail: user.email,
       ip: req.ip,
@@ -367,6 +415,7 @@ Instructions:
       sql: safeSql,
       data: dataPayload,
       explanation,
+      aiAnswer,
     });
   } catch (err) {
     next(err);
