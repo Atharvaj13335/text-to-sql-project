@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 
 const userSchema = new mongoose.Schema(
   {
@@ -14,6 +15,8 @@ const userSchema = new mongoose.Schema(
 );
 
 const User = mongoose.model("User", userSchema);
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,17 +38,25 @@ function sanitizeUser(user) {
 // Sign Up — rejects if account already exists
 // ---------------------------------------------------------------------------
 export async function registerUser({ email, name, password, mobile, provider, avatar }) {
-  if (!email) throw { status: 400, message: "Email is required." };
+  if (!email || !EMAIL_REGEX.test(email)) {
+    throw { status: 400, message: "A valid email address is required." };
+  }
+
+  if (password && password.length < 6) {
+    throw { status: 400, message: "Password must be at least 6 characters long." };
+  }
 
   const existing = await User.findOne({ email: email.toLowerCase() });
   if (existing) {
     throw { status: 409, message: "Account already registered with this email. Please sign in instead." };
   }
 
+  const hashedPassword = password ? await bcrypt.hash(password, 10) : "";
+
   const user = new User({
     email: email.toLowerCase(),
     name: name || email.split("@")[0],
-    password: password || "",
+    password: hashedPassword,
     mobile: mobile || "",
     provider: provider || "password",
     avatar: avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(email)}`,
@@ -59,8 +70,12 @@ export async function registerUser({ email, name, password, mobile, provider, av
 // Sign In — rejects if account doesn't exist
 // ---------------------------------------------------------------------------
 export async function loginUser(email, password) {
-  if (!email) throw { status: 400, message: "Email is required." };
-  if (!password) throw { status: 400, message: "Password is required." };
+  if (!email || !EMAIL_REGEX.test(email)) {
+    throw { status: 400, message: "A valid email address is required." };
+  }
+  if (!password) {
+    throw { status: 400, message: "Password is required." };
+  }
 
   const user = await User.findOne({ email: email.toLowerCase() });
   if (!user) {
@@ -71,7 +86,8 @@ export async function loginUser(email, password) {
     throw { status: 401, message: "This account was registered via Google/OTP. Please use that method to sign in, or set a password via Sign Up." };
   }
 
-  if (user.password !== password) {
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (!isMatch) {
     throw { status: 401, message: "Incorrect password. Please try again." };
   }
 

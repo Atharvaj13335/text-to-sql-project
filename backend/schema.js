@@ -1,12 +1,3 @@
-// Keep this in sync with your real database. Generate it once with a script
-// that reads INFORMATION_SCHEMA.COLUMNS, then hand-edit for clarity — the
-// model does much better with short human descriptions than raw DDL.
-
-// Plain array of allowed table names, used by validateSql.js to build its
-// allow-list. Keep this in sync with the prose description below — ideally
-// generate both from the same source of truth once the project matures.
-export const SCHEMA_TABLES = ["CompositePerformance", "Benchmark", "Account"];
-
 export const SCHEMA_DESCRIPTION = `
 Table: CompositePerformance
   - CompositeID (int, primary key)
@@ -29,3 +20,9 @@ Table: Account
   - MarketValue (decimal) - total market value in USD e.g. 12500000.00
   - InceptionDate (date) - account opening date e.g. '2021-03-15'
 `;
+
+// Single source of truth: SCHEMA_TABLES is dynamically derived from SCHEMA_DESCRIPTION
+export const SCHEMA_TABLES = Array.from(
+  SCHEMA_DESCRIPTION.matchAll(/^Table:\s*(\w+)/gm),
+  (m) => m[1]
+);

@@ -58,41 +58,45 @@ export function getMockQueryData(tablesUsed = [], sqlString = "") {
 
     let filtered = [...rawRows];
 
-    // 2. WHERE Clause Filter
+    // 2. WHERE Clause Filter (multi-condition AND evaluation)
     const whereMatch = sqlString.match(/WHERE\s+([\s\S]+?)(?:ORDER\s+BY|GROUP\s+BY|$)/i);
     if (whereMatch) {
       const whereClause = whereMatch[1].trim();
+      const conditions = whereClause.split(/\s+AND\s+/i);
 
-      // Check string equality / LIKE: e.g. AccountName = 'Alpha Tech Ventures Account' or AccountName LIKE '%Tech%'
-      const strEqualMatch = whereClause.match(/([a-zA-Z0-9_]+)\s*(=|LIKE)\s*'([^']+)'/i);
-      if (strEqualMatch) {
-        const [, col, op, val] = strEqualMatch;
-        filtered = filtered.filter((row) => {
-          const rowVal = String(row[col] || row[getColNameWithoutAlias(col)] || "").toLowerCase();
-          const targetVal = val.toLowerCase().replace(/%/g, "");
-          if (op.toUpperCase() === "LIKE") {
-            return rowVal.includes(targetVal);
+      filtered = filtered.filter((row) => {
+        return conditions.every((cond) => {
+          // Check string equality / LIKE
+          const strMatch = cond.match(/([a-zA-Z0-9_\.]+)\s*(=|LIKE)\s*'([^']+)'/i);
+          if (strMatch) {
+            const [, rawCol, op, val] = strMatch;
+            const col = getColNameWithoutAlias(rawCol);
+            const rowVal = String(row[col] ?? "").toLowerCase();
+            const targetVal = val.toLowerCase().replace(/%/g, "");
+            if (op.toUpperCase() === "LIKE") {
+              return rowVal.includes(targetVal);
+            }
+            return rowVal === targetVal;
           }
-          return rowVal === targetVal;
-        });
-      }
 
-      // Check numeric comparisons: e.g. YTDReturn > 10
-      const numCompMatch = whereClause.match(/([a-zA-Z0-9_]+)\s*(>|<|>=|<=|=)\s*(\d+(?:\.\d+)?)/i);
-      if (numCompMatch && !strEqualMatch) {
-        const [, col, op, numStr] = numCompMatch;
-        const targetNum = parseFloat(numStr);
-        filtered = filtered.filter((row) => {
-          const val = parseFloat(row[col] || row[getColNameWithoutAlias(col)]);
-          if (isNaN(val)) return true;
-          if (op === ">") return val > targetNum;
-          if (op === "<") return val < targetNum;
-          if (op === ">=") return val >= targetNum;
-          if (op === "<=") return val <= targetNum;
-          if (op === "=") return val === targetNum;
+          // Check numeric comparison
+          const numMatch = cond.match(/([a-zA-Z0-9_\.]+)\s*(>|<|>=|<=|=)\s*(\d+(?:\.\d+)?)/i);
+          if (numMatch) {
+            const [, rawCol, op, numStr] = numMatch;
+            const col = getColNameWithoutAlias(rawCol);
+            const val = parseFloat(row[col]);
+            const targetNum = parseFloat(numStr);
+            if (isNaN(val)) return true;
+            if (op === ">") return val > targetNum;
+            if (op === "<") return val < targetNum;
+            if (op === ">=") return val >= targetNum;
+            if (op === "<=") return val <= targetNum;
+            if (op === "=") return val === targetNum;
+          }
+
           return true;
         });
-      }
+      });
     }
 
     // 3. ORDER BY Clause

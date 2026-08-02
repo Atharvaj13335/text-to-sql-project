@@ -1,6 +1,12 @@
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret_key";
+// Ensure JWT_SECRET is strong; generate per-boot random fallback if env var is absent
+const JWT_SECRET = (() => {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  console.warn("⚠️  SECURITY WARNING: JWT_SECRET environment variable is not set. Generating a random secret per server instance.");
+  return crypto.randomBytes(32).toString("hex");
+})();
 
 /**
  * Generate a JWT token for a user.
@@ -14,20 +20,14 @@ export function generateToken(user) {
 }
 
 /**
- * Express middleware — validates Bearer token.
+ * Express middleware — strictly validates Bearer token.
  * Attaches decoded user payload to `req.user`.
  */
 export function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
 
-  // Also allow legacy x-user-email header for backward compatibility
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    const legacyEmail = req.headers["x-user-email"];
-    if (legacyEmail) {
-      req.user = { email: legacyEmail.trim().toLowerCase() };
-      return next();
-    }
-    return res.status(401).json({ success: false, error: "Authentication required. Please sign in." });
+    return res.status(401).json({ success: false, error: "Authentication required. Please sign in with a valid token." });
   }
 
   const token = authHeader.split(" ")[1];

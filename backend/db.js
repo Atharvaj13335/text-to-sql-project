@@ -5,6 +5,7 @@ const config = {
   database: process.env.DB_NAME,
   user: process.env.DB_USER, // should be a login with SELECT-only permission — see README
   password: process.env.DB_PASSWORD,
+  requestTimeout: 15000, // 15s global query execution timeout
   options: {
     encrypt: true, // required for Azure SQL, safe to leave on generally
     trustServerCertificate: false,

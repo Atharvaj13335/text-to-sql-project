@@ -85,8 +85,31 @@ Use plain text formatting with bullet points and bold highlights. Keep it concis
   }
 }
 
+import { logAuditEntry } from "./auditLogger.js";
+
+// Rate limiting in-memory store for auth endpoints (max 10 attempts per 15 minutes per IP)
+const authAttempts = new Map();
+function rateLimitAuth(req, res, next) {
+  const ip = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const attempts = authAttempts.get(ip) || [];
+  const validAttempts = attempts.filter((t) => now - t < windowMs);
+
+  if (validAttempts.length >= 10) {
+    return res.status(429).json({ success: false, error: "Too many authentication attempts. Please try again after 15 minutes." });
+  }
+
+  validAttempts.push(now);
+  authAttempts.set(ip, validAttempts);
+  next();
+}
+
 app.post("/api/ask", async (req, res) => {
   const question = req.body?.question;
+  const startTime = Date.now();
+  const clientIp = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
+  const userEmail = req.user?.email || "anonymous";
 
   if (!question || typeof question !== "string" || question.length > 500) {
     return res.status(400).json({ success: false, error: "Please provide a question (max 500 characters)." });
@@ -116,6 +139,17 @@ ${ragContextText}`;
     const parsed = extractJson(rawText);
 
     if (!parsed.sql) {
+      logAuditEntry({
+        userEmail,
+        ip: clientIp,
+        queryType: "CONVERSATIONAL",
+        question,
+        sql: null,
+        executionTimeMs: Date.now() - startTime,
+        status: "SUCCESS",
+        rowCount: 0,
+      });
+
       return res.status(200).json({
         success: true,
         isConversational: true,
@@ -130,8 +164,6 @@ ${ragContextText}`;
     }
 
     // 2. Structural validation — the real gate. Throws SqlValidationError
-    //    rather than returning a boolean, so failure and success paths
-    //    can't be accidentally confused.
     const { sql: safeSql, tablesUsed } = validateAndSanitizeSql(parsed.sql, {
       allowedTables: SCHEMA_TABLES,
       maxRows: MAX_ROWS,
@@ -164,8 +196,17 @@ ${ragContextText}`;
       aiAnswer = await generateNaturalLanguageAnswer(question, safeSql, columns, rows, parsed.explanation);
     }
 
-    // 5. Log query for auditability
-    console.log(JSON.stringify({ at: new Date().toISOString(), question, sql: safeSql, tablesUsed, dbWarning }));
+    // 5. Log query for auditability into audit.jsonl
+    logAuditEntry({
+      userEmail,
+      ip: clientIp,
+      queryType: "TEXT_TO_SQL",
+      question,
+      sql: safeSql,
+      executionTimeMs: Date.now() - startTime,
+      status: "SUCCESS",
+      rowCount: rows.length,
+    });
 
     return res.status(200).json({
       success: true,
@@ -180,6 +221,19 @@ ${ragContextText}`;
       ragDocs: ragDocs.map((d) => ({ title: d.title, category: d.category })),
     });
   } catch (error) {
+    const executionTimeMs = Date.now() - startTime;
+    logAuditEntry({
+      userEmail,
+      ip: clientIp,
+      queryType: "TEXT_TO_SQL",
+      question,
+      sql: null,
+      executionTimeMs,
+      status: "FAILURE",
+      rowCount: 0,
+      error: error.message,
+    });
+
     if (error instanceof SqlValidationError) {
       console.warn("Blocked unsafe generated SQL:", error.code, error.message);
       return res.status(422).json({
@@ -205,11 +259,14 @@ ${ragContextText}`;
 });
 
 // ---------------------------------------------------------------------------
-// Execute custom / edited SQL query
+// Execute custom / edited SQL query (JWT-Protected)
 // ---------------------------------------------------------------------------
 
-app.post("/api/execute-sql", async (req, res) => {
+app.post("/api/execute-sql", authMiddleware, async (req, res) => {
   const customSql = req.body?.sql;
+  const startTime = Date.now();
+  const clientIp = req.ip || req.headers["x-forwarded-for"] || "127.0.0.1";
+  const userEmail = req.user?.email || "anonymous";
 
   if (!customSql || typeof customSql !== "string" || customSql.length > 2000) {
     return res.status(400).json({ success: false, error: "Please provide a valid SQL query." });
@@ -229,7 +286,16 @@ app.post("/api/execute-sql", async (req, res) => {
     const columns = result.recordset.length > 0 ? Object.keys(result.recordset[0]) : [];
     const rows = result.recordset.map((row) => Object.values(row).map(String));
 
-    console.log(JSON.stringify({ at: new Date().toISOString(), type: "custom-sql", sql: safeSql, tablesUsed }));
+    logAuditEntry({
+      userEmail,
+      ip: clientIp,
+      queryType: "DIRECT_EXECUTE",
+      question: "User Custom SQL Execution",
+      sql: safeSql,
+      executionTimeMs: Date.now() - startTime,
+      status: "SUCCESS",
+      rowCount: result.recordset.length,
+    });
 
     return res.status(200).json({
       success: true,
@@ -241,6 +307,19 @@ app.post("/api/execute-sql", async (req, res) => {
       rowCount: result.recordset.length,
     });
   } catch (error) {
+    const executionTimeMs = Date.now() - startTime;
+    logAuditEntry({
+      userEmail,
+      ip: clientIp,
+      queryType: "DIRECT_EXECUTE",
+      question: "User Custom SQL Execution",
+      sql: customSql,
+      executionTimeMs,
+      status: "FAILURE",
+      rowCount: 0,
+      error: error.message,
+    });
+
     if (error instanceof SqlValidationError) {
       console.warn("Blocked unsafe custom SQL:", error.code, error.message);
       return res.status(422).json({
@@ -264,7 +343,7 @@ app.post("/api/execute-sql", async (req, res) => {
 import { generateToken, authMiddleware } from "./authMiddleware.js";
 
 // Sign Up — rejects if account already exists
-app.post("/api/auth/signup", async (req, res) => {
+app.post("/api/auth/signup", rateLimitAuth, async (req, res) => {
   try {
     const { email, name, password, mobile, provider, avatar } = req.body;
     const user = await registerUser({ email, name, password, mobile, provider, avatar });
@@ -279,7 +358,7 @@ app.post("/api/auth/signup", async (req, res) => {
 });
 
 // Sign In — rejects if account doesn't exist
-app.post("/api/auth/signin", async (req, res) => {
+app.post("/api/auth/signin", rateLimitAuth, async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await loginUser(email, password);
