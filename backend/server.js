@@ -21,6 +21,7 @@ import { getCachedQuery, setCachedQuery } from "./queryCache.js";
 import { recordFeedback } from "./feedbackStore.js";
 import { validateBody, signupSchema, signinSchema, askSchema, executeSqlSchema } from "./validatorMiddleware.js";
 import { errorHandler } from "./errorHandler.js";
+import { handleSseConnect, handleSseMessage } from "./mcpSse.js";
 
 // Fail fast on startup if environment variables are missing
 validateEnvironment();
@@ -482,6 +483,14 @@ app.delete("/api/chats/:id", authMiddleware, async (req, res, next) => {
     next(err);
   }
 });
+
+// ============================================================================
+// Remote MCP (Model Context Protocol) SSE Endpoints
+// Allows remote AI clients (Claude Desktop, Cursor, AI agents) to connect over HTTP/HTTPS
+// ============================================================================
+
+app.get("/mcp/sse", handleSseConnect);
+app.post("/mcp/message", handleSseMessage);
 
 // Centralized Global Express Error Handler Middleware
 app.use(errorHandler);

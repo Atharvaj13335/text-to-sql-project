@@ -1,6 +1,8 @@
 # Production Model Context Protocol (MCP) Integration Guide
 
-The Financial Text-to-SQL Assistant features a production-grade **Model Context Protocol (MCP) Server** (`backend/mcpServer.js`). It allows external AI tools (such as Claude Desktop, Cursor, or custom agents) to directly inspect database schemas, run safety-validated queries, query domain knowledge, and retrieve analyst prompts.
+The Financial Text-to-SQL Assistant features a production-grade **Model Context Protocol (MCP) Server**. It supports two transport modes:
+1. **Local Stdio Transport** (`backend/mcpServer.js`): For local CLI testing and developer workstations.
+2. **Remote SSE Transport** (`GET /mcp/sse` & `POST /mcp/message` in `server.js`): For serving remote AI clients over standard HTTP/HTTPS anywhere in the world at **$0 extra cost**.
 
 ---
 
@@ -9,31 +11,40 @@ The Financial Text-to-SQL Assistant features a production-grade **Model Context 
 ### 📦 Resources (`financial://`)
 | Resource URI | Description | MIME Type |
 |---|---|---|
-| `financial://schema` | Full T-SQL schema definition, table names, columns, data types, and entity rules. | `text/plain` |
-| `financial://knowledge` | Investment performance definitions, benchmarks, and calculation formulas. | `application/json` |
+| `financial://schema` | Full T-SQL schema definition, table names, columns, data types. | `text/plain` |
+| `financial://knowledge` | All financial domain knowledge documents with TF-IDF metadata. | `application/json` |
+| `financial://knowledge/{id}` | Specific knowledge document (e.g., `financial://knowledge/gips_compliance`). | `text/plain` |
 
 ### 🛠️ Tools
-1. **`execute_financial_sql`**:
-   - Executes SELECT-only queries with AST validation, RBAC checks (`admin`, `analyst`, `viewer`), timeout, and audit logging.
-2. **`validate_sql_query`**:
-   - Validates SQL safety (SELECT-only, table allowlist, TOP caps) without executing against the database.
-3. **`search_domain_knowledge`**:
-   - Performs RAG search over financial domain definitions and benchmark mappings.
+1. `execute_financial_sql`: Safely execute SELECT queries with AST validation, RBAC enforcement (`admin`, `analyst`, `viewer`), timeout, and MongoDB audit logging.
+2. `validate_sql_query`: Pre-validate SQL query safety without execution.
+3. `search_domain_knowledge`: TF-IDF weighted search over RAG knowledge base.
+4. `list_knowledge_documents`: List all active knowledge documents.
+5. `add_knowledge_document`: Add a new document to the RAG knowledge store.
+6. `delete_knowledge_document`: Remove a knowledge document by ID.
 
 ### 💡 Prompts
 - `financial_analyst_prompt`: Standard system prompt for financial data analysis.
 
 ---
 
-## 2. Claude Desktop Integration
+## 2. Remote Production Setup (SSE over HTTP/HTTPS)
 
-To connect Claude Desktop to your local Financial Assistant MCP Server:
+When your backend (`server.js`) is running locally or deployed to the cloud (AWS, Azure, Render, Docker):
+
+### Public Endpoints:
+- **SSE Stream**: `GET http://localhost:3001/mcp/sse` (or `https://your-domain.com/mcp/sse`)
+- **Message Receiver**: `POST http://localhost:3001/mcp/message?sessionId=...`
+
+Any remote user or client application can connect using standard HTTP/HTTPS!
+
+---
+
+## 3. Local Claude Desktop Integration (Stdio Mode)
 
 Open your Claude Desktop config file:
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-Add the following configuration:
 
 ```json
 {
@@ -54,31 +65,11 @@ Add the following configuration:
 }
 ```
 
-Restart Claude Desktop. You will see the hammer 🛠️ icon containing `execute_financial_sql`, `validate_sql_query`, and `search_domain_knowledge`.
-
 ---
 
-## 3. Cursor & VS Code Integration
-
-In Cursor or VS Code (with MCP extension enabled):
+## 4. Cursor / VS Code Integration
 
 1. Go to **Settings** → **MCP Servers** → **Add New Server**.
 2. **Name**: `financial-mcp`
 3. **Transport**: `stdio`
 4. **Command**: `npm --prefix d:/text-to-sql-project/backend run mcp`
-
----
-
-## 4. Running & Testing MCP via CLI
-
-You can test running the MCP server directly in your terminal:
-
-```bash
-cd backend
-npm run mcp
-```
-
-Output:
-```
-🚀 Production MCP Server connected via Stdio transport.
-```
