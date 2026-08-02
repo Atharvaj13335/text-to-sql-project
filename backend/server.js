@@ -73,6 +73,25 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
     return "No matching financial records were found for your query.";
   }
 
+  // Single-row aggregate result (AVG, SUM, STDEV, COUNT scalar) — just present directly
+  if (rows.length === 1 && columns.length >= 1) {
+    const singleRow = rows[0];
+    const parts = columns.map((col, i) => {
+      const val = singleRow[i];
+      const numVal = Number(val);
+      const isReturn = /return|spread|active|ytd|alpha/i.test(col);
+      const isCurrency = /marketvalue|value|aum|total|sum/i.test(col) && !/return/i.test(col);
+      const isCount = /count|num|accounts/i.test(col);
+      let formatted;
+      if (isReturn && !isNaN(numVal)) formatted = `${numVal.toFixed(2)}%`;
+      else if (isCurrency && !isNaN(numVal)) formatted = `$${numVal.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+      else if (isCount && !isNaN(numVal)) formatted = `${numVal}`;
+      else formatted = val;
+      return `**${col}**: ${formatted}`;
+    });
+    return `Result: ${parts.join(" | ")}.`;
+  }
+
   // Exclude ID columns (e.g. AccountID, CompositeID) when finding descriptive name column
   let nameIdx = columns.findIndex((c) => /name/i.test(c) && !/id$/i.test(c));
   if (nameIdx === -1) {
@@ -80,8 +99,8 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
   }
   if (nameIdx === -1) nameIdx = 0;
 
-  // Find numeric metric column (e.g. MarketValue, YTDReturn, AUM, Count), ignoring IDs
-  let valIdx = columns.findIndex((c) => /return|marketvalue|value|aum|count|total/i.test(c) && !/id$/i.test(c));
+  // Find numeric metric column (e.g. MarketValue, YTDReturn, AUM, Count, Spread), ignoring IDs
+  let valIdx = columns.findIndex((c) => /return|spread|active|marketvalue|value|aum|count|total|ytd|alpha/i.test(c) && !/id$/i.test(c));
   if (valIdx === -1) {
     valIdx = columns.findIndex((c, i) => i !== nameIdx && !/id$/i.test(c) && !/date$/i.test(c));
   }
@@ -91,11 +110,11 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
     const topName = topItem[nameIdx];
     const rawVal = topItem[valIdx];
 
-    const isReturn = /return/i.test(columns[valIdx]);
-    const isCurrency = /marketvalue|value|aum|revenue|total/i.test(columns[valIdx]);
+    const isReturn = /return|spread|active|ytd|alpha/i.test(columns[valIdx]);
+    const isCurrency = /marketvalue|value|aum|revenue|total/i.test(columns[valIdx]) && !/return/i.test(columns[valIdx]);
     const numVal = Number(rawVal);
-    const formattedVal = isReturn
-      ? `${rawVal}%`
+    const formattedVal = isReturn && !isNaN(numVal)
+      ? `${numVal.toFixed(2)}%`
       : isCurrency && !isNaN(numVal)
       ? `$${numVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
       : rawVal;
@@ -108,8 +127,8 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
     const secondName = secondItem[nameIdx];
     const secondRaw = secondItem[valIdx];
     const numSecond = Number(secondRaw);
-    const formattedSecond = isReturn
-      ? `${secondRaw}%`
+    const formattedSecond = isReturn && !isNaN(numSecond)
+      ? `${numSecond.toFixed(2)}%`
       : isCurrency && !isNaN(numSecond)
       ? `$${numSecond.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
       : secondRaw;
@@ -288,12 +307,15 @@ Domain Knowledge & KPI Formulas:
 ${ragContextText}
 
 Instructions:
-1. Respond with a valid JSON object matching this schema:
+1. Respond with a valid JSON object matching this schema ONLY:
    {
-     "sql": "SELECT TOP 200 ...",
-     "explanation": "Brief non-technical description of the results"
+     "sql": "SELECT TOP 200 ... (valid T-SQL)",
+     "explanation": "Plain English answer to the user's question, including actual computed values and results in natural language e.g. 'The Tech Innovation Fund has the highest YTD return at 24.10%'"
    }
-2. ONLY output raw JSON. Do NOT wrap in Markdown code blocks.`,
+2. ONLY output raw JSON. Do NOT wrap in Markdown or code blocks.
+3. For math questions: use SUM, AVG, COUNT, ROUND, STDEV, DATEDIFF, CASE WHEN, or computed column expressions directly in SQL.
+4. Write the explanation as if you are a financial analyst answering the question directly — include numbers, entities, and findings from the expected results.
+5. Always think step-by-step about what JOINs, GROUP BYs, and ORDER BYs are needed.`,
       },
       ...conversationHistory,
       {
