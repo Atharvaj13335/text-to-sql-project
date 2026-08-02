@@ -365,7 +365,7 @@ app.post("/api/chats", authMiddleware, async (req, res) => {
 app.put("/api/chats/:id", authMiddleware, async (req, res) => {
   try {
     const userEmail = getUserEmail(req);
-    const chat = await updateChat(req.params.id, req.body, userEmail);
+    const chat = await updateChat(req.params.id, userEmail, req.body);
     if (!chat) return res.status(404).json({ success: false, error: "Chat not found." });
     res.json({ success: true, chat });
   } catch (err) {
