@@ -370,10 +370,10 @@ function QuickQueriesModal({ isOpen, onClose, onSelectQuery }) {
   if (!isOpen) return null;
 
   const sampleQueries = [
-    { label: "Top 5 Composites", query: "Show top 5 composites by YTD return" },
-    { label: "Asset Class Allocation", query: "Show total AUM breakdown by asset class" },
-    { label: "Recent Performance", query: "List monthly returns for large cap equity" },
-    { label: "Risk Metrics", query: "Show portfolio Sharpe ratio and volatility metrics" },
+    { label: "Top Composites by YTD Return", query: "Show top 5 composites by YTD return" },
+    { label: "Accounts > $10M Market Value", query: "List all accounts with market value greater than 10 million" },
+    { label: "Composite vs Benchmark Return", query: "Compare composite YTD returns against benchmark returns" },
+    { label: "AUM & Account Count by Composite", query: "Show total market value and account count by composite" },
   ];
 
   return (
