@@ -80,7 +80,7 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
       const val = singleRow[i];
       const numVal = Number(val);
       const isReturn = /return|spread|active|ytd|alpha/i.test(col);
-      const isCurrency = /marketvalue|value|aum|total|sum/i.test(col) && !/return/i.test(col);
+      const isCurrency = /marketvalue|value|aum|total|sum|combined/i.test(col) && !/return/i.test(col);
       const isCount = /count|num|accounts/i.test(col);
       let formatted;
       if (isReturn && !isNaN(numVal)) formatted = `${numVal.toFixed(2)}%`;
@@ -91,6 +91,25 @@ function generateDataInsight(question, columns, rows, fallbackExplanation) {
     });
     return `Result: ${parts.join(" | ")}.`;
   }
+
+  // Smart fallback: if question asks for combined/total and multiple rows returned, compute sum server-side
+  const isAggQuestion = /combined|sum of|total of|add together|aggregate/i.test(question);
+  if (isAggQuestion && rows.length > 1) {
+    const valIdx = columns.findIndex((c) => /marketvalue|value|aum|return|total/i.test(c) && !/id$/i.test(c));
+    if (valIdx !== -1) {
+      const total = rows.reduce((acc, row) => acc + (Number(row[valIdx]) || 0), 0);
+      const colName = columns[valIdx];
+      const isCurrency = /marketvalue|value|aum|total/i.test(colName) && !/return/i.test(colName);
+      const isReturn = /return|ytd/i.test(colName);
+      const formatted = isCurrency
+        ? `$${total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : isReturn
+        ? `${total.toFixed(2)}%`
+        : total.toFixed(2);
+      return `The combined **${colName}** across ${rows.length} records is **${formatted}**.`;
+    }
+  }
+
 
   // Exclude ID columns (e.g. AccountID, CompositeID) when finding descriptive name column
   let nameIdx = columns.findIndex((c) => /name/i.test(c) && !/id$/i.test(c));
@@ -306,16 +325,34 @@ app.post("/api/ask", authMiddleware, askLimiter, validateBody(askSchema), async 
 Domain Knowledge & KPI Formulas:
 ${ragContextText}
 
+Known Entities in the Database:
+Accounts: Alpha Tech Ventures Account, Fidelity Partner Account B, Horizon Global Wealth Fund, Vanguard Institutional Trust
+Composites: US Large Cap Growth Composite, Global Equity Opportunities, Tech Innovation Fund
+Benchmarks: S&P 500 Index, Nasdaq 100 Index, MSCI World Index
+
+Few-Shot Examples (follow this pattern exactly):
+Q: "What is the combined market value of Alpha Tech Ventures Account and Fidelity Partner Account B?"
+A (sql): SELECT TOP 200 SUM(a.MarketValue) AS CombinedMarketValue FROM Account a WHERE a.AccountName IN ('Alpha Tech Ventures Account', 'Fidelity Partner Account B')
+
+Q: "Which composites outperform their benchmark?"
+A (sql): SELECT TOP 200 cp.CompositeName, cp.YTDReturn, b.BenchmarkName, b.BenchmarkReturn, ROUND(cp.YTDReturn - b.BenchmarkReturn, 2) AS ActiveReturn FROM CompositePerformance cp JOIN Benchmark b ON cp.BenchmarkID = b.BenchmarkID WHERE cp.YTDReturn > b.BenchmarkReturn ORDER BY ActiveReturn DESC
+
+Q: "What is the average YTD return across all composites?"
+A (sql): SELECT TOP 200 ROUND(AVG(YTDReturn), 2) AS AvgYTDReturn FROM CompositePerformance
+
+Q: "Show total AUM, account count, and average account size per composite"
+A (sql): SELECT TOP 200 cp.CompositeName, SUM(a.MarketValue) AS TotalAUM, COUNT(a.AccountID) AS AccountCount, ROUND(AVG(a.MarketValue), 2) AS AvgAccountSize FROM CompositePerformance cp JOIN Account a ON a.CompositeID = cp.CompositeID GROUP BY cp.CompositeName ORDER BY TotalAUM DESC
+
 Instructions:
 1. Respond with a valid JSON object matching this schema ONLY:
    {
      "sql": "SELECT TOP 200 ... (valid T-SQL)",
-     "explanation": "Plain English answer to the user's question, including actual computed values and results in natural language e.g. 'The Tech Innovation Fund has the highest YTD return at 24.10%'"
+     "explanation": "Direct answer using actual numbers — e.g. 'The combined market value is $21,250,000.00'"
    }
 2. ONLY output raw JSON. Do NOT wrap in Markdown or code blocks.
-3. For math questions: use SUM, AVG, COUNT, ROUND, STDEV, DATEDIFF, CASE WHEN, or computed column expressions directly in SQL.
-4. Write the explanation as if you are a financial analyst answering the question directly — include numbers, entities, and findings from the expected results.
-5. Always think step-by-step about what JOINs, GROUP BYs, and ORDER BYs are needed.`,
+3. For "combined/sum/total of X and Y" questions: ALWAYS use SUM() with WHERE IN ('X', 'Y') — never return multiple rows.
+4. For math/aggregation questions: use SUM, AVG, COUNT, ROUND, STDEV, DATEDIFF, CASE WHEN.
+5. Match entity names exactly from the Known Entities list above.`,
       },
       ...conversationHistory,
       {
