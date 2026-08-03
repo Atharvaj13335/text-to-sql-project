@@ -686,8 +686,6 @@ This project is licensed under the **ISC License** — see the [LICENSE](LICENSE
 
 <div align="center">
 
-**Built with ❤️ by [Atharva Joshi](https://github.com/Atharvaj13335)**
-
 ⭐ Star this repository if you found it useful!
 
 </div>
